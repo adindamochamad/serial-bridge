@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Main hexagon gradient: deep indigo → electric blue → violet -->
+    <linearGradient id="hex-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2a2a6a"/>
+      <stop offset="45%" stop-color="#4f6ef7"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+
+    <!-- Bright outer border -->
+    <linearGradient id="hex-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8090ff"/>
+      <stop offset="100%" stop-color="#d8a8ff"/>
+    </linearGradient>
+
+    <!-- Inner wave line gradient (slightly transparent white) -->
+    <linearGradient id="wave-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.5"/>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.5"/>
+    </linearGradient>
+
+    <!-- Soft glow for center node -->
+    <filter id="soft-glow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="24"/>
+    </filter>
+
+    <!-- Inner highlight for 3D feel -->
+    <radialGradient id="inner-highlight" cx="50%" cy="35%" r="75%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Hexagon shape (pointy top/bottom, radius 430, center 512,512) -->
+  <path d="M 512 82 L 884 297 L 884 727 L 512 942 L 140 727 L 140 297 Z"
+        fill="url(#hex-bg)"
+        stroke="url(#hex-border)"
+        stroke-width="14"
+        stroke-linejoin="round"/>
+
+  <!-- Inner subtle highlight -->
+  <path d="M 512 82 L 884 297 L 884 727 L 512 942 L 140 727 L 140 297 Z"
+        fill="url(#inner-highlight)"
+        stroke="none"/>
+
+  <!-- Subtle circuit traces (background texture) -->
+  <g stroke="#ffffff" stroke-opacity="0.08" stroke-width="3" fill="none" stroke-linecap="round">
+    <path d="M 200 340 L 260 340 L 260 290 L 320 290"/>
+    <path d="M 824 340 L 764 340 L 764 290 L 704 290"/>
+    <path d="M 200 684 L 260 684 L 260 734 L 320 734"/>
+    <path d="M 824 684 L 764 684 L 764 734 L 704 734"/>
+    <circle cx="200" cy="340" r="6" fill="#ffffff" fill-opacity="0.18" stroke="none"/>
+    <circle cx="824" cy="340" r="6" fill="#ffffff" fill-opacity="0.18" stroke="none"/>
+    <circle cx="200" cy="684" r="6" fill="#ffffff" fill-opacity="0.18" stroke="none"/>
+    <circle cx="824" cy="684" r="6" fill="#ffffff" fill-opacity="0.18" stroke="none"/>
+  </g>
+
+  <!-- Left signal wave (from legacy side) -->
+  <path d="M 230 512 Q 300 410, 370 512 T 490 512"
+        fill="none"
+        stroke="url(#wave-grad)"
+        stroke-width="28"
+        stroke-linecap="round"/>
+
+  <!-- Right signal wave (to modern cloud) -->
+  <path d="M 534 512 Q 604 614, 674 512 T 794 512"
+        fill="none"
+        stroke="url(#wave-grad)"
+        stroke-width="28"
+        stroke-linecap="round"/>
+
+  <!-- Center connection node (the "bridge") -->
+  <circle cx="512" cy="512" r="72" fill="#ffffff" opacity="0.3" filter="url(#soft-glow)"/>
+  <circle cx="512" cy="512" r="42" fill="#ffffff"/>
+  <circle cx="512" cy="512" r="22" fill="#4f6ef7"/>
+  <circle cx="512" cy="512" r="8" fill="#ffffff"/>
+</svg>

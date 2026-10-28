@@ -1,0 +1,66 @@
+/* SerialBridge design tokens */
+
+:root {
+  --color-canvas: #f0f2f5;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f7f8fa;
+  --color-ink: #1c2b33;
+  --color-muted: #65676b;
+  --color-caption: #8a8d91;
+  --color-border: #e4e6eb;
+  --color-border-strong: #ced0d4;
+
+  --color-primary: #0064e0;
+  --color-primary-hover: #0058c4;
+  --color-bright: #0082fb;
+  --gradient-brand: linear-gradient(120deg, #0064e0 0%, #0082fb 100%);
+
+  --color-ai-accent: #a259ff;
+  --color-success: #42b72a;
+  --color-warning: #f5a623;
+  --color-error: #fa383e;
+
+  --color-stream-bg: #0b1220;
+  --color-stream-text: #e8eef6;
+  --color-stream-muted: #7a8aa8;
+
+  --radius-pill: 999px;
+  --radius-card: 16px;
+  --radius-control: 12px;
+  --radius-modal: 20px;
+
+  --shadow-card: 0 1px 2px rgba(28, 43, 51, 0.06), 0 8px 24px rgba(28, 43, 51, 0.08);
+  --shadow-modal: 0 20px 80px rgba(28, 43, 51, 0.18);
+  --backdrop-modal: rgba(28, 43, 51, 0.32);
+
+  --surface-elevated: var(--color-surface);
+  --text-primary: var(--color-ink);
+  --border-subtle: var(--color-border);
+
+  --font-sans: Inter, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", Consolas, monospace;
+
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+}

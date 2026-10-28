@@ -1,0 +1,32 @@
+# Not readable by the agent: secrets and credentials.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/*.p12
+**/secrets/**
+**/credentials/**
+
+# Terraform state and plan artifacts.
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform/**
+**/tfplan
+
+# Local databases, dumps, and backups.
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/*dump*.sql
+**/*.bak
+
+
+# Build output, dependencies, and Rust artifacts.
+**/node_modules/**
+**/.svelte-kit/**
+**/build/**
+**/target/**
+private/**
+**/*.log
+**/.DS_Store
