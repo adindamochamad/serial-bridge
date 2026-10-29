@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    omnibridge_lib::run()
+    serialbridge_lib::run()
 }

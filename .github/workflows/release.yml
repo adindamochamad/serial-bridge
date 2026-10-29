@@ -61,7 +61,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VITE_ANTHROPIC_API_KEY: ${{ secrets.VITE_ANTHROPIC_API_KEY }}
           # macOS code signing (optional — omit to produce unsigned builds)
           # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -71,7 +70,7 @@ jobs:
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'OmniBridge ${{ github.ref_name }}'
+          releaseName: 'SerialBridge ${{ github.ref_name }}'
           releaseBody: |
             ## What's new
             <!-- Edit this section before tagging, or update via GitHub UI after release -->
@@ -79,7 +78,7 @@ jobs:
             ### First-time install notes
             - **macOS**: Right-click the app → Open (required once for unsigned builds)
             - **Windows**: Click "More info" → "Run anyway" if SmartScreen appears
-            - **Linux**: `chmod +x OmniBridge*.AppImage && ./OmniBridge*.AppImage`
+            - **Linux**: `chmod +x SerialBridge*.AppImage && ./SerialBridge*.AppImage`
 
             ### No hardware? No problem
             Try **Demo Mode** — includes virtual CAS Scale, GPS receiver, Arduino sensor, and Modbus PLC.

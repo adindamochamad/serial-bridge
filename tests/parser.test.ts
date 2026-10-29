@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { compileFields, parseStream, latest, numericHistory } from '../src/lib/parser.js';
+import {
+  compileFields,
+  parseStream,
+  parseStreamWithCompiled,
+  latest,
+  numericHistory,
+} from '../src/lib/parser.js';
 import type { AnalysisField } from '../src/lib/ai-analysis.js';
 import type { DataLine } from '../src/lib/types.js';
 
@@ -89,6 +95,15 @@ describe('parseStream — CAS scale protocol', () => {
     const result = parseStream(lines, casFields);
     expect(latest(result.history.weight)?.value).toBe(0.025);
     expect(typeof latest(result.history.weight)?.value).toBe('number');
+  });
+
+  it('parseStreamWithCompiled matches parseStream output', () => {
+    const lines = [makeLine('ST,GS,  1.234 kg', 1)];
+    const compiled = compileFields(casFields);
+    const a = parseStream(lines, casFields);
+    const b = parseStreamWithCompiled(lines, casFields, compiled);
+    expect(b.history.weight).toEqual(a.history.weight);
+    expect(b.parsableFieldCount).toBe(a.parsableFieldCount);
   });
 });
 

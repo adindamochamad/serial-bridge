@@ -5,7 +5,7 @@
     defaultSendFilter,
     sendWebhook,
     renderFormBody,
-    templateFormTimbangan,
+    scaleFormTemplate,
     shouldSendWebhook,
     type WebhookConfig,
     type WebhookPayload,
@@ -13,8 +13,8 @@
   } from '$lib/webhook.js';
   import { WEBHOOK_PRESETS, applyWebhookPreset } from '$lib/webhook-presets.js';
   import { formatTimestamp } from '$lib/types.js';
-  import { urlEfektifUntukWebhook } from '$lib/cas-scale.js';
-  import { URL_WEBHOOK_DEV, URL_WEBHOOK_ONLINE } from '$lib/konfigurasi-default-cas.js';
+  import { effectiveWebhookUrl } from '$lib/cas-scale.js';
+  import { URL_WEBHOOK_DEV } from '$lib/cas-default-config.js';
 
   let {
     config,
@@ -34,8 +34,12 @@
   // so untrack() captures the starting value without triggering the warning.
   let draft = $state<WebhookConfig>(untrack(() => {
     const base = config ?? defaultConfig();
+    const onlineUrl = base.url_online?.trim();
+    const url =
+      base.mode_webhook === 'ONLINE' && onlineUrl ? onlineUrl : base.url;
     return {
       ...base,
+      url,
       send_filter: { ...defaultSendFilter(), ...(base.send_filter ?? {}) },
     };
   }));
@@ -44,13 +48,11 @@
   let testResult = $state<{ ok: boolean; message: string } | null>(null);
   let saving = $state(false);
   let showPayload = $state(false);
-  const urlAktif = $derived(urlEfektifUntukWebhook(draft));
+  const activeUrl = $derived(effectiveWebhookUrl(draft));
 
   async function handleSave() {
     saving = true;
     try {
-      // Sinkronkan ENTIS dengan toggle enable agar konsisten dengan port card
-      draft = { ...draft, entis: draft.enabled };
       await onSave(draft);
       onClose();
     } finally {
@@ -113,7 +115,7 @@
     if (!samplePayload) return '';
     return draft.body_format === 'form'
       ? renderFormBody(
-          draft.form_template?.trim() || templateFormTimbangan(),
+          draft.form_template?.trim() || scaleFormTemplate(),
           samplePayload,
           draft
         )
@@ -173,20 +175,12 @@
         <span class="toggle-label">Enable webhook forwarding</span>
       </label>
 
-      <!-- URL -->
       <div class="field">
-        <label for="wh-url">
-          Webhook URL
-          {#if (draft.mode_webhook ?? 'DEV') === 'ONLINE'}
-            <span class="hint">(ONLINE → {URL_WEBHOOK_ONLINE})</span>
-          {:else}
-            <span class="hint">(DEV → {URL_WEBHOOK_DEV})</span>
-          {/if}
-        </label>
+        <label for="wh-url">Webhook URL</label>
         <input
           id="wh-url"
           type="url"
-          placeholder="https://dev.bat.entis.app/api/scale"
+          placeholder={URL_WEBHOOK_DEV}
           bind:value={draft.url}
         />
       </div>
@@ -225,25 +219,15 @@
 
       <!-- Form template (only when form-encoded) -->
       {#if draft.body_format === 'form'}
-        <div class="field hint-box">
-          <span class="hint">
-            Kode Timbangan, Company ID, dan <strong>ENTIS</strong> diatur di card port sidebar.
-            Centang ENTIS = auto-forward aktif.
-            Saat ini: mode <code>{draft.mode_webhook ?? 'DEV'}</code>
-            · <code>{draft.scales_code}</code> · company <code>{draft.company_id}</code>
-            · ENTIS <code>{draft.entis ? '1 (auto-kirim)' : '0'}</code>
-          </span>
-        </div>
-
         <div class="field">
           <label for="wh-template">
             Form Body Template
-            <span class="hint">gunakan <code>{'{{scales_code}}'}</code>, <code>{'{{weight}}'}</code>, <code>{'{{company_id}}'}</code></span>
+            <span class="hint">tokens such as <code>{'{{port}}'}</code>, <code>{'{{weight}}'}</code>, <code>{'{{timestamp}}'}</code></span>
           </label>
           <textarea
             id="wh-template"
             rows="2"
-            placeholder="scales-code={'{{scales_code}}'}&amp;scales-weight={'{{weight}}'}&amp;company-id={'{{company_id}}'}"
+            placeholder="device-id={'{{port}}'}&amp;reading={'{{weight}}'}&amp;timestamp={'{{timestamp}}'}"
             bind:value={draft.form_template}
           ></textarea>
           {#if availableTokens.length > 0}
@@ -364,7 +348,7 @@
     </div>
 
     <footer class="modal-footer">
-      <button class="btn secondary" onclick={handleTest} disabled={testing || !urlAktif}>
+      <button class="btn secondary" onclick={handleTest} disabled={testing || !activeUrl}>
         {testing ? 'Testing…' : 'Test'}
       </button>
       <div class="spacer"></div>
@@ -543,26 +527,6 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 0.6rem;
-  }
-
-  .hint-box {
-    padding: 0.45rem 0.6rem;
-    background: #141c30;
-    border-radius: 6px;
-    border: 1px solid #1e2a40;
-  }
-
-  .hint-box .hint {
-    font-size: 0.72rem;
-    line-height: 1.5;
-  }
-
-  .hint-box code {
-    background: #1a2038;
-    padding: 0.05rem 0.25rem;
-    border-radius: 3px;
-    font-family: "JetBrains Mono", monospace;
-    color: #8aa0d0;
   }
 
   /* Stats */

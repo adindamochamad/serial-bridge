@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { AnalysisField } from '$lib/ai-analysis.js';
   import type { DataLine } from '$lib/types.js';
-  import { parseStream, latest, numericHistory } from '$lib/parser.js';
+  import { compileFields, parseStreamWithCompiled, latest, numericHistory } from '$lib/parser.js';
   import Sparkline from './Sparkline.svelte';
 
   let {
@@ -12,7 +12,8 @@
     lines: DataLine[];
   } = $props();
 
-  const parsed = $derived(parseStream(lines, fields));
+  const compiledRegex = $derived(compileFields(fields));
+  const parsed = $derived(parseStreamWithCompiled(lines, fields, compiledRegex));
   const parsableFields = $derived(fields.filter((f) => parsed.compiledRegex[f.name]));
 
   // Tick every second so "last updated N ago" updates

@@ -7,8 +7,8 @@ import {
   shouldSendWebhook,
   type WebhookPayload,
 } from '../src/lib/webhook.js';
-import { urlEfektifUntukWebhook, URL_WEBHOOK_ONLINE } from '../src/lib/cas-scale.js';
-import { URL_WEBHOOK_DEV } from '../src/lib/konfigurasi-default-cas.js';
+import { effectiveWebhookUrl, URL_WEBHOOK_ONLINE } from '../src/lib/cas-scale.js';
+import { URL_WEBHOOK_DEV } from '../src/lib/cas-default-config.js';
 import { applyWebhookPreset, WEBHOOK_PRESETS } from '../src/lib/webhook-presets.js';
 
 const samplePayload: WebhookPayload = {
@@ -31,14 +31,40 @@ const unstablePayload: WebhookPayload = {
   },
 };
 
-describe('urlEfektifUntukWebhook', () => {
-  it('DEV fallback ke URL staging jika url kosong', () => {
-    expect(urlEfektifUntukWebhook({ mode_webhook: 'DEV', url: '' })).toBe(URL_WEBHOOK_DEV);
+describe('effectiveWebhookUrl', () => {
+  it('uses url when set', () => {
+    expect(
+      effectiveWebhookUrl({
+        mode_webhook: 'DEV',
+        url: 'https://hooks.example.com/in',
+        url_online: '',
+      })
+    ).toBe('https://hooks.example.com/in');
   });
 
-  it('ONLINE selalu ke bat.entis.app', () => {
+  it('falls back to the default URL when url is empty', () => {
     expect(
-      urlEfektifUntukWebhook({ mode_webhook: 'ONLINE', url: 'https://dev.bat.entis.app/api/scale' })
+      effectiveWebhookUrl({ mode_webhook: 'DEV', url: '', url_online: '' })
+    ).toBe(URL_WEBHOOK_DEV);
+  });
+
+  it('legacy ONLINE uses url_online only when url is empty', () => {
+    expect(
+      effectiveWebhookUrl({
+        mode_webhook: 'ONLINE',
+        url: '',
+        url_online: 'https://prod.example.com/hook',
+      })
+    ).toBe('https://prod.example.com/hook');
+  });
+
+  it('legacy ONLINE falls back to default production URL', () => {
+    expect(
+      effectiveWebhookUrl({
+        mode_webhook: 'ONLINE',
+        url: '',
+        url_online: '',
+      })
     ).toBe(URL_WEBHOOK_ONLINE);
   });
 });
@@ -71,20 +97,15 @@ describe('parseHeaders', () => {
 });
 
 describe('renderFormBody', () => {
-  const cfg = { ...defaultConfig(), scales_code: 'S100', company_id: '2', entis: true };
+  const cfg = { ...defaultConfig(), scales_code: 'S100', company_id: '2' };
 
   it('substitutes field tokens and url-encodes values', () => {
     const body = renderFormBody(
-      'scales-code={{scales_code}}&scales-weight={{weight}}&company-id={{company_id}}&entis={{entis}}',
+      'scales-code={{scales_code}}&scales-weight={{weight}}&company-id={{company_id}}',
       samplePayload,
       cfg
     );
-    expect(body).toBe('scales-code=S100&scales-weight=1.234&company-id=2&entis=1');
-  });
-
-  it('resolves entis=0 when checkbox off', () => {
-    const body = renderFormBody('entis={{entis}}', samplePayload, { ...cfg, entis: false });
-    expect(body).toBe('entis=0');
+    expect(body).toBe('scales-code=S100&scales-weight=1.234&company-id=2');
   });
 
   it('resolves top-level metadata tokens', () => {
@@ -158,10 +179,10 @@ describe('webhook presets', () => {
 });
 
 describe('sendWebhook URL validation', () => {
-  it('default config punya URL DEV dan gs-key placeholder', () => {
+  it('default config has a webhook URL and API key placeholder', () => {
     const cfg = defaultConfig();
     expect(cfg.url).toBe(URL_WEBHOOK_DEV);
-    expect(cfg.custom_headers).toContain('gs-key');
+    expect(cfg.custom_headers).toContain('X-API-Key');
   });
 
   it('rejects non-http(s) protocol', async () => {

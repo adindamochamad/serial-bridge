@@ -3,7 +3,6 @@
   import { formatTimestamp, type DataLine } from '$lib/types.js';
   import AnalysisPanel from '$lib/AnalysisPanel.svelte';
   import StructuredDashboard from '$lib/StructuredDashboard.svelte';
-  import ScalePushPanel from '$lib/ScalePushPanel.svelte';
   import WebhookConfigModal from '$lib/WebhookConfigModal.svelte';
   import {
     analyzeStream,
@@ -20,7 +19,7 @@
   import ChatPanel, { type ChatMessage } from '$lib/ChatPanel.svelte';
   import CommandSender from '$lib/CommandSender.svelte';
   import { profileToAnalysis, type DeviceProfile } from '$lib/profiles.js';
-  import { compileFields, parseStream, latest } from '$lib/parser.js';
+  import { compileFields, parseStreamWithCompiled, latest } from '$lib/parser.js';
   import {
     defaultStats,
     saveConfig as saveWebhookConfig,
@@ -139,6 +138,10 @@
   const webhookKey = $derived(deviceFingerprint ?? `port:${port}`);
   const webhookConfig = $derived(webhookConfigProp);
 
+  const analysisFieldRegex = $derived(
+    analysisResult ? compileFields(analysisResult.fields) : ({} as Record<string, RegExp | null>)
+  );
+
   // Throttle timer — fires periodically; sends latest snapshot when there's
   // valid data to forward. Earlier dirty-flag pattern relied on Svelte
   // tracking `lines.length` inside an effect with an early return, which did
@@ -153,7 +156,7 @@
 
   function buildPayload(): WebhookPayload | null {
     if (!analysisResult) return null;
-    const parsed = parseStream(lines, analysisResult.fields);
+    const parsed = parseStreamWithCompiled(lines, analysisResult.fields, analysisFieldRegex);
     const fields: WebhookPayload['fields'] = {};
     for (const f of analysisResult.fields) {
       const lv = latest(parsed.history[f.name] ?? []);
@@ -201,10 +204,6 @@
     await saveWebhookConfig(webhookKey, cfg);
     await onWebhookConfigChange?.(cfg);
   }
-
-  const punyaFieldBerat = $derived(
-    analysisResult?.fields.some((f) => f.name === 'weight') ?? false
-  );
 
   // ── Export menu ──────────────────────────────────────────────────────────
   let exportMenuOpen = $state(false);
@@ -446,27 +445,27 @@
         {/if}
       </button>
       <button
-        class="ctrl-btn analyze"
-        onclick={runAnalysis}
-        disabled={analysisLoading || lines.length === 0}
-        title="⬡ Analyze — Naive one-shot on muse-spark-1.3. Installs a parser without the evidence gate (contrast lane)."
-      >
-        {#if analysisLoading}
-          <span class="spin-sm">◌</span> Analyzing…
-        {:else}
-          ⬡ Analyze
-        {/if}
-      </button>
-      <button
-        class="ctrl-btn investigate"
+        class="ctrl-btn investigate primary-action"
         onclick={runInvestigation}
         disabled={investigating || lines.length === 0}
-        title="🔬 Investigate — the analysis model tool loop. Parser and dashboard install only if the commit gate sees matching framing evidence."
+        title="🔬 Investigate — muse-spark-1.3 tool loop. Parser and dashboard install only if the verified commit gate sees evidence."
       >
         {#if investigating}
           <span class="spin-sm">◌</span> Investigating…
         {:else}
           🔬 Investigate
+        {/if}
+      </button>
+      <button
+        class="ctrl-btn analyze secondary-action"
+        onclick={runAnalysis}
+        disabled={analysisLoading || lines.length === 0}
+        title="Naive one-shot — installs a parser without the evidence gate (contrast lane for judges)."
+      >
+        {#if analysisLoading}
+          <span class="spin-sm">◌</span> Analyzing…
+        {:else}
+          Naive (no gate)
         {/if}
       </button>
       <button
@@ -684,14 +683,6 @@
               fields={analysisResult?.fields ?? []}
               {lines}
             />
-            {#if punyaFieldBerat}
-              <ScalePushPanel
-                config={webhookConfig}
-                payload={buildPayload()}
-                stats={webhookStats}
-                onStatsChange={(s) => (webhookStats = s)}
-              />
-            {/if}
           {:else if bottomTab === 'investigation'}
             <AgentTracePanel
               trace={agentTrace}
@@ -860,28 +851,30 @@
     cursor: default;
   }
 
-  .ctrl-btn.analyze {
-    border-color: var(--color-primary);
-    color: var(--color-primary);
-    background: #e7f3ff;
-  }
-
-  .ctrl-btn.analyze:hover:not(:disabled) {
-    background: #d4ebff;
-    border-color: var(--color-primary-hover);
-    color: var(--color-primary-hover);
-  }
-
-  .ctrl-btn.investigate {
+  .ctrl-btn.investigate.primary-action {
     border-color: var(--color-ai-accent);
     color: var(--color-ai-accent);
     background: #f3ebff;
+    font-weight: 600;
   }
 
-  .ctrl-btn.investigate:hover:not(:disabled) {
+  .ctrl-btn.investigate.primary-action:hover:not(:disabled) {
     background: #ebe0ff;
     border-color: #8b45e8;
     color: #8b45e8;
+  }
+
+  .ctrl-btn.analyze.secondary-action {
+    border-color: var(--color-border-strong);
+    color: var(--color-ink-muted, #6b7280);
+    background: transparent;
+    font-size: 0.8rem;
+  }
+
+  .ctrl-btn.analyze.secondary-action:hover:not(:disabled) {
+    background: var(--color-surface-muted);
+    border-color: var(--color-border-strong);
+    color: var(--color-ink);
   }
 
   .ctrl-btn.send {

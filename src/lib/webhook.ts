@@ -1,7 +1,7 @@
 import { Store } from '@tauri-apps/plugin-store';
 import { invoke } from '@tauri-apps/api/core';
-import { urlEfektifUntukWebhook } from './cas-scale.js';
-import { konfigurasiWebhookCasDefault } from './konfigurasi-default-cas.js';
+import { effectiveWebhookUrl } from './cas-scale.js';
+import { defaultCasWebhookConfig } from './cas-default-config.js';
 
 const STORE_FILE = 'serialbridge.webhooks.json';
 const KEY_CONFIGS = 'configs';
@@ -31,15 +31,15 @@ export interface WebhookConfig {
   include_raw: boolean;
   custom_headers: string; // newline-separated "Key: Value"
   body_format: WebhookBodyFormat;
-  form_template: string; // e.g. "scales-code={{scales_code}}&scales-weight={{weight}}"
-  /** Kode timbangan untuk endpoint legacy (dropdown). */
+  form_template: string;
+  /** Optional template token {{scales_code}} (persisted; not shown in the port card). */
   scales_code: string;
-  /** ID perusahaan untuk endpoint legacy (dropdown). */
+  /** Optional template token {{company_id}} (persisted; not shown in the port card). */
   company_id: string;
-  /** Centang ENTIS = auto-forward webhook aktif; juga dikirim sebagai entis=1/0 di form body. */
-  entis: boolean;
   /** Mode endpoint: DEV (staging) atau ONLINE (production). */
   mode_webhook: 'DEV' | 'ONLINE';
+  /** Production endpoint when mode_webhook is ONLINE. */
+  url_online: string;
   send_filter: WebhookSendFilter;
 }
 
@@ -70,21 +70,21 @@ export function defaultSendFilter(): WebhookSendFilter {
 }
 
 export function defaultConfig(): WebhookConfig {
-  return konfigurasiWebhookCasDefault();
+  return defaultCasWebhookConfig();
 }
 
-/** Template form standar untuk integrasi timbangan legacy. */
-export function templateFormTimbangan(): string {
-  return 'scales-code={{scales_code}}&scales-weight={{weight}}&company-id={{company_id}}&entis={{entis}}';
+/** Default form body for legacy scale integrations. */
+export function scaleFormTemplate(): string {
+  return 'device-id={{port}}&reading={{weight}}&timestamp={{timestamp}}';
 }
 
 /** Cek apakah payload memenuhi filter pengiriman webhook. */
 export function shouldSendWebhook(config: WebhookConfig, payload: WebhookPayload): boolean {
   const filter = config.send_filter ?? defaultSendFilter();
   if (!filter.enabled) return true;
-  const nama_field = filter.field.trim();
-  if (!nama_field) return true;
-  const field = payload.fields[nama_field];
+  const fieldName = filter.field.trim();
+  if (!fieldName) return true;
+  const field = payload.fields[fieldName];
   if (!field) return false;
   return String(field.value) === filter.value;
 }
@@ -121,19 +121,20 @@ export async function getConfig(fingerprint: string): Promise<WebhookConfig | nu
   if (!stored) return null;
   // Merge defaults so configs saved before body_format/form_template existed
   // still load with sane values instead of undefined.
-  const dasar = konfigurasiWebhookCasDefault();
-  const merged = { ...dasar, ...stored };
-  // Isi ulang field kosong dari konfigurasi bawaan (store lama bisa punya string '')
-  if (!merged.url?.trim()) merged.url = dasar.url;
-  if (!merged.custom_headers?.trim()) merged.custom_headers = dasar.custom_headers;
-  if (!merged.form_template?.trim()) merged.form_template = dasar.form_template;
-  if (!merged.body_format) merged.body_format = dasar.body_format;
+  const defaults = defaultCasWebhookConfig();
+  const storedRecord = stored as WebhookConfig & { entis?: boolean };
+  const { entis: legacyEntis, ...storedRest } = storedRecord;
+  const merged = { ...defaults, ...storedRest };
+  if (!merged.url?.trim()) merged.url = defaults.url;
+  if (!merged.url_online?.trim()) merged.url_online = defaults.url_online;
+  if (!merged.custom_headers?.trim()) merged.custom_headers = defaults.custom_headers;
+  if (!merged.form_template?.trim()) merged.form_template = defaults.form_template;
+  merged.form_template = merged.form_template.replace(/&?entis=\{\{\s*entis\s*\}\}/gi, '');
+  if (!merged.body_format) merged.body_format = defaults.body_format;
   merged.send_filter = { ...defaultSendFilter(), ...(merged.send_filter ?? {}) };
-  // ENTIS = saklar auto-forward; selaraskan dengan enabled
-  if (stored.entis === undefined && stored.enabled) {
-    merged.entis = true;
+  if (typeof legacyEntis === 'boolean') {
+    merged.enabled = legacyEntis;
   }
-  merged.enabled = merged.entis;
   return merged;
 }
 
@@ -196,8 +197,6 @@ function resolveToken(
       return config?.scales_code ?? '';
     case 'company_id':
       return config?.company_id ?? '';
-    case 'entis':
-      return config?.entis ? '1' : '0';
     default: {
       const field = payload.fields[token];
       return field ? String(field.value) : '';
@@ -228,17 +227,17 @@ export async function sendWebhook(
   config: WebhookConfig,
   payload: WebhookPayload
 ): Promise<SendResult> {
-  const urlKirim = urlEfektifUntukWebhook(config);
-  if (!urlKirim) {
+  const requestUrl = effectiveWebhookUrl(config);
+  if (!requestUrl) {
     return {
       ok: false,
       status: null,
-      error: config.mode_webhook === 'ONLINE' ? 'URL production kosong' : 'URL is empty',
+      error: 'URL is empty',
     };
   }
 
   try {
-    const url = new URL(urlKirim);
+    const url = new URL(requestUrl);
     if (!['http:', 'https:'].includes(url.protocol)) {
       return { ok: false, status: null, error: 'URL must be http:// or https://' };
     }
@@ -250,7 +249,7 @@ export async function sendWebhook(
   let contentType: string;
   if (config.body_format === 'form') {
     const template =
-      config.form_template?.trim() || templateFormTimbangan();
+      config.form_template?.trim() || scaleFormTemplate();
     body = renderFormBody(template, payload, config);
     contentType = 'application/x-www-form-urlencoded';
   } else {
@@ -260,7 +259,7 @@ export async function sendWebhook(
 
   const headers: Record<string, string> = {
     'Content-Type': contentType,
-    'User-Agent': 'SerialBridge/0.1',
+    'User-Agent': 'SerialBridge/0.2.2',
     ...parseHeaders(config.custom_headers),
   };
 
@@ -269,7 +268,7 @@ export async function sendWebhook(
   // Access-Control-* headers fails preflight as "TypeError: Failed to fetch".
   try {
     const res = await invoke<TauriWebhookResponse>('send_webhook_request', {
-      url: urlKirim,
+      url: requestUrl,
       method: config.method,
       headers,
       body,

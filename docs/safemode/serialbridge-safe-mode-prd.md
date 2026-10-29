@@ -1,4 +1,6 @@
-# OmniBridge Safe Mode: PRD & Build Spec for Cursor (v2)
+# SerialBridge Safe Mode: PRD & Build Spec for Cursor (v2)
+
+> Historical product name: OmniBridge. App and crate are now SerialBridge.
 
 > Owner: Adinda Panca Mochamad (`adindamochamad`) · Date: 8 Oct 2026 · Status: Draft v2. Replaces v1, which wrongly assumed Python + MQTT + Telegram + a process sandbox.
 > Grounded in https://github.com/adindamochamad/omnibridge at commit `075b35e` (9 Aug 2026). Line numbers refer to that commit and may drift, so re-check them in M0.
@@ -206,16 +208,16 @@ Rules: small tasks, one commit each. Rust policy logic is tested with `cargo tes
 
 ## 5. Definition of Done (verifiable)
 
-- [ ] `rg send_bytes_to_port src/lib/agent-tools.ts` returns nothing, and the Vitest static test enforces it.
-- [ ] Rust tests: deny, timeout and late approve → the writer gets 0 calls; approve → exactly 1 call with identical bytes.
-- [ ] Unknown tool, oversize payload, deny-pattern match, rate-limit hit and invalid policy → Deny (Rust tests).
-- [ ] The agent receives a structured `do_not_retry` result on deny or timeout, and the session block prevents a second prompt (tests M1.4, M2.3).
-- [ ] The audit JSONL has the events for a full flow, and `verify()` detects tampering (tests M4.1, M4.2).
-- [ ] Safe Mode is on at first run; disabling requires the confirm text and is logged (test M4.4).
-- [ ] The injection demo ends in an approval dialog or a block, never a silent write (M5 tests + manual run).
+- [x] `rg send_bytes_to_port src/lib/agent-tools.ts` returns nothing, and the Vitest static test enforces it.
+- [x] Rust tests: deny, timeout and late approve → the writer gets 0 calls; approve → exactly 1 call with identical bytes.
+- [x] Unknown tool, oversize payload, deny-pattern match, rate-limit hit and invalid policy → Deny (Rust tests).
+- [x] The agent receives a structured `do_not_retry` result on deny or timeout, and the session block prevents a second prompt (tests M1.4, M2.3).
+- [x] The audit JSONL has the events for a full flow, and `verify()` detects tampering (tests M4.1, M4.2).
+- [x] Safe Mode is on at first run; disabling requires the confirm text and is logged (test M4.4).
+- [x] The injection demo ends in an approval dialog or a block, never a silent write (M5 tests + manual run).
 - [ ] The existing features still work: discovery, monitor, Command Sender, baud probe, webhooks, demo devices, one-shot analysis (manual checklist in REPO_NOTES.md).
-- [ ] CI is green: fmt, clippy `-D warnings`, `cargo check`, **`cargo test`**, `npm run check`, `npm test`, `npm run build`.
-- [ ] `docs/safemode/README.md` (EN + ID): where the policy file lives, how to edit it, and what each result means.
+- [x] CI is green: fmt, clippy `-D warnings`, `cargo check`, **`cargo test`**, `npm run check`, `npm test`, `npm run build`.
+- [x] `docs/safemode/README.md` (EN + ID): where the policy file lives, how to edit it, and what each result means.
 
 ---
 

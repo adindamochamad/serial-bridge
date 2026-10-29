@@ -1,11 +1,11 @@
 import casScalePreset from '../../presets/cas-scale.json';
-import { apakahAdaptorCh340 } from './cas-scale.js';
+import { isCh340Adapter } from './cas-scale.js';
 import { getAllProfiles, type DeviceProfile } from './profiles.js';
 import { saveConfig, getConfig, defaultConfig, type WebhookConfig } from './webhook.js';
 import { deviceFingerprint, type DiscoveredDevice } from './types.js';
 import type { CommandPreset } from './ai-analysis.js';
 
-interface PresetBundled {
+interface BundledPreset {
   id: string;
   name: string;
   description: string;
@@ -27,51 +27,50 @@ interface PresetBundled {
   webhook?: Partial<WebhookConfig>;
 }
 
-const DAFTAR_PRESET: PresetBundled[] = [casScalePreset as PresetBundled];
+const BUNDLED_PRESETS: BundledPreset[] = [casScalePreset as BundledPreset];
 
-function cocokPreset(device: DiscoveredDevice, preset: PresetBundled): boolean {
+function presetMatchesDevice(device: DiscoveredDevice, preset: BundledPreset): boolean {
   const manuf = (device.manufacturer ?? '').toLowerCase();
-  const produk = (device.product ?? '').toLowerCase();
+  const product = (device.product ?? '').toLowerCase();
 
-  const cocokManuf = preset.match.manufacturer_contains?.some((k) =>
+  const matchManuf = preset.match.manufacturer_contains?.some((k) =>
     manuf.includes(k.toLowerCase())
   );
-  const cocokProduk = preset.match.product_contains?.some((k) =>
-    produk.includes(k.toLowerCase())
+  const matchProduct = preset.match.product_contains?.some((k) =>
+    product.includes(k.toLowerCase())
   );
 
-  // Hanya match eksplisit — hindari false positive dari kata "scale" generik
-  return !!(cocokManuf || cocokProduk || apakahAdaptorCh340(device));
+  return !!(matchManuf || matchProduct || isCh340Adapter(device));
 }
 
-/** Terapkan preset bawaan ke store lokal jika belum ada profil untuk device ini. */
-export async function terapkanPresetBundled(
+/** Apply a bundled preset to local store if this device has no profile yet. */
+export async function applyBundledPreset(
   device: DiscoveredDevice
 ): Promise<{
-  profil: DeviceProfile | null;
+  profile: DeviceProfile | null;
   webhook: WebhookConfig | null;
-  profilBaruDibuat: boolean;
-  webhookBaruDibuat: boolean;
+  profileCreated: boolean;
+  webhookCreated: boolean;
 }> {
-  const preset = DAFTAR_PRESET.find((p) => cocokPreset(device, p));
+  const preset = BUNDLED_PRESETS.find((p) => presetMatchesDevice(device, p));
   if (!preset) {
-    return { profil: null, webhook: null, profilBaruDibuat: false, webhookBaruDibuat: false };
+    return { profile: null, webhook: null, profileCreated: false, webhookCreated: false };
   }
 
   const fp = deviceFingerprint(device);
-  const profilAda = (await getAllProfiles())[fp];
-  const webhookAda = await getConfig(fp);
+  const existingProfile = (await getAllProfiles())[fp];
+  const existingWebhook = await getConfig(fp);
 
-  let profilHasil: DeviceProfile | null = profilAda ?? null;
-  let webhookHasil: WebhookConfig | null = webhookAda ?? null;
-  let profilBaruDibuat = false;
-  let webhookBaruDibuat = false;
+  let profile: DeviceProfile | null = existingProfile ?? null;
+  let webhook: WebhookConfig | null = existingWebhook ?? null;
+  let profileCreated = false;
+  let webhookCreated = false;
 
-  if (!profilAda) {
-    profilBaruDibuat = true;
-    const sekarang = Date.now();
-    const dataProfil = preset.profile;
-    profilHasil = {
+  if (!existingProfile) {
+    profileCreated = true;
+    const now = Date.now();
+    const data = preset.profile;
+    profile = {
       fingerprint: fp,
       vid: device.vid,
       pid: device.pid,
@@ -79,54 +78,55 @@ export async function terapkanPresetBundled(
       manufacturer: device.manufacturer,
       product: device.product,
       device_class: device.device_class,
-      suggested_baud: dataProfil.suggested_baud,
-      needs_baud_warmup: dataProfil.needs_baud_warmup ?? true,
-      protocol: dataProfil.protocol,
-      confidence: dataProfil.confidence,
-      device_hint: dataProfil.device_hint,
-      expected_fields: dataProfil.expected_fields,
-      command_presets: dataProfil.command_presets ?? [],
-      notes: dataProfil.notes,
-      first_learned_at: sekarang,
-      last_seen_at: sekarang,
+      suggested_baud: data.suggested_baud,
+      needs_baud_warmup: data.needs_baud_warmup ?? true,
+      protocol: data.protocol,
+      confidence: data.confidence,
+      device_hint: data.device_hint,
+      expected_fields: data.expected_fields,
+      command_presets: data.command_presets ?? [],
+      notes: data.notes,
+      first_learned_at: now,
+      last_seen_at: now,
       sample_count: 1,
-      high_water_confidence: dataProfil.confidence,
+      high_water_confidence: data.confidence,
+      source: 'bundled',
       sumber: 'bundled',
     };
-    const semua = await getAllProfiles();
+    const all = await getAllProfiles();
     const { Store } = await import('@tauri-apps/plugin-store');
     const store = await Store.load('serialbridge.profiles.json');
-    semua[fp] = profilHasil;
-    await store.set('profiles', semua);
+    all[fp] = profile;
+    await store.set('profiles', all);
     await store.save();
   }
 
-  if (!webhookAda && preset.webhook) {
-    webhookBaruDibuat = true;
-    webhookHasil = { ...defaultConfig(), ...preset.webhook };
-    await saveConfig(fp, webhookHasil);
+  if (!existingWebhook && preset.webhook) {
+    webhookCreated = true;
+    webhook = { ...defaultConfig(), ...preset.webhook };
+    await saveConfig(fp, webhook);
   }
 
-  return { profil: profilHasil, webhook: webhookHasil, profilBaruDibuat, webhookBaruDibuat };
+  return { profile, webhook, profileCreated, webhookCreated };
 }
 
-/** Terapkan semua preset yang cocok untuk daftar device yang ditemukan. */
-export async function terapkanSemuaPresetBundled(
+/** Apply every matching bundled preset for the discovered device list. */
+export async function applyAllBundledPresets(
   devices: DiscoveredDevice[]
-): Promise<{ profilBaru: number; webhookBaru: number }> {
-  let profilBaru = 0;
-  let webhookBaru = 0;
+): Promise<{ profilesCreated: number; webhooksCreated: number }> {
+  let profilesCreated = 0;
+  let webhooksCreated = 0;
   for (const d of devices) {
-    const hasil = await terapkanPresetBundled(d);
-    if (hasil.profilBaruDibuat) profilBaru++;
-    if (hasil.webhookBaruDibuat) webhookBaru++;
+    const result = await applyBundledPreset(d);
+    if (result.profileCreated) profilesCreated++;
+    if (result.webhookCreated) webhooksCreated++;
   }
-  return { profilBaru, webhookBaru };
+  return { profilesCreated, webhooksCreated };
 }
 
-/** Daftar preset yang tersedia di repo (untuk dokumentasi UI). */
-export function daftarPresetBundled(): Array<{ id: string; name: string; description: string }> {
-  return DAFTAR_PRESET.map((p) => ({
+/** Bundled presets shipped in the repo (for UI copy). */
+export function listBundledPresets(): Array<{ id: string; name: string; description: string }> {
+  return BUNDLED_PRESETS.map((p) => ({
     id: p.id,
     name: p.name,
     description: p.description,

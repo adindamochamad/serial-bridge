@@ -283,6 +283,33 @@ describe('commit gate', () => {
     expect(broken.startsWith('01 03 14')).toBe(true);
   });
 
+  it('commits Modbus when host preflight CRC evidence is already in the trace', () => {
+    const lines = buildDemoBufferLines('modbus-plc', 8);
+    const toolOutput = JSON.stringify({
+      modbus_crc_check: { validity_ratio: 1, frames_tested: 8 },
+    });
+    const out = applyCommitGate(
+      {
+        protocol: 'Modbus RTU',
+        confidence: 92,
+        device_hint: 'PLC',
+        fields: [
+          {
+            name: 'reg0',
+            regex: '01 03 14 ([0-9A-F]{2} [0-9A-F]{2})',
+            match_hex: true,
+            capture_group: 1,
+          },
+        ],
+        notes: '',
+      },
+      lines,
+      [{ type: 'tool_result', tool_name: 'analyze_binary_structure', tool_output: toolOutput }],
+      'verified'
+    );
+    expect(out.committed).toBe(true);
+  });
+
   it('demo Modbus buffer CRC is 1.00 intact and below 0.90 when flipped', () => {
     const intact = buildDemoBufferLines('modbus-plc', 12, { breakCrc: false });
     const broken = buildDemoBufferLines('modbus-plc', 12, { breakCrc: true });
@@ -337,11 +364,12 @@ describe('commit gate', () => {
 
   it('reads the same machine values when only the CRC bytes are flipped', () => {
     const intact = buildDemoBufferLines('modbus-plc', 1, { breakCrc: false });
-    const reading = readModbusMachine(intact[0].hex);
+    const response = intact.find((line) => line.direction === 'rx') ?? intact[intact.length - 1];
+    const reading = readModbusMachine(response.hex);
     expect(reading).not.toBeNull();
     expect(reading!.temperatureC).toBeGreaterThan(0);
     expect(reading!.motorRpm).toBeGreaterThan(0);
-    expect(readModbusMachine(breakTrailingCrc(intact[0].hex))).toEqual(reading);
+    expect(readModbusMachine(breakTrailingCrc(response.hex))).toEqual(reading);
   });
 
   it('virtual transmit blocks when the lane did not commit', () => {

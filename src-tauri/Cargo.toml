@@ -1,5 +1,5 @@
 [package]
-name = "omnibridge"
+name = "serialbridge"
 version = "0.2.2"
 description = "A Tauri App"
 authors = ["you"]
@@ -11,7 +11,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "omnibridge_lib"
+name = "serialbridge_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -22,13 +22,12 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri-plugin-serialplugin = "2.22.0"
 serialport = "4.9.0"
 tauri-plugin-store = "2.4.2"
 # Native HTTP client for webhook forwarding — runs in Rust so requests are not
 # subject to the WebView's CORS policy (browser fetch() hits CORS preflight).
 # rustls-tls keeps the build self-contained (no system OpenSSL) across laptops.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # Safe Mode policy: compile and match hex payload patterns (M1).
 regex = "1"
 # Safe Mode audit log: SHA-256 hash chain over JSONL lines (M4).

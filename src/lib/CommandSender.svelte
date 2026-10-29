@@ -25,6 +25,8 @@
   let sending = $state(false);
   let status = $state<{ ok: boolean; text: string } | null>(null);
   let history = $state<string[]>([]);
+  let sendConfirmPending = $state(false);
+  let sendConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 
   function parseAsciiToBytes(text: string): number[] {
     // Handle escape sequences: \r \n \t \\ \xNN
@@ -62,8 +64,29 @@
     return bytes;
   }
 
+  function clearSendConfirm() {
+    sendConfirmPending = false;
+    if (sendConfirmTimer) {
+      clearTimeout(sendConfirmTimer);
+      sendConfirmTimer = null;
+    }
+  }
+
+  function armSendConfirm(): boolean {
+    if (!sendConfirmPending) {
+      sendConfirmPending = true;
+      status = { ok: true, text: 'Click Send again within 4s to transmit to the device' };
+      if (sendConfirmTimer) clearTimeout(sendConfirmTimer);
+      sendConfirmTimer = setTimeout(clearSendConfirm, 4000);
+      return false;
+    }
+    clearSendConfirm();
+    return true;
+  }
+
   async function send() {
     if (!input.trim()) return;
+    if (!armSendConfirm()) return;
     sending = true;
     status = null;
 
@@ -150,8 +173,13 @@
       autocomplete="off"
       spellcheck="false"
     />
-    <button class="send-btn" onclick={send} disabled={sending || !input.trim()}>
-      {#if sending}◌{:else}Send ↵{/if}
+    <button
+      class="send-btn"
+      class:pending-confirm={sendConfirmPending}
+      onclick={send}
+      disabled={sending || !input.trim()}
+    >
+      {#if sending}◌{:else if sendConfirmPending}Confirm ↵{:else}Send ↵{/if}
     </button>
   </div>
 
@@ -289,6 +317,11 @@
 
   .cmd-input:focus {
     border-color: #f59e0b;
+  }
+
+  .send-btn.pending-confirm {
+    border-color: #f59e0b;
+    color: #fbbf24;
   }
 
   .send-btn {

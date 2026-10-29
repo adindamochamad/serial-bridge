@@ -6,7 +6,14 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke } from '@tauri-apps/api/core';
-import { executeTool, type ToolContext } from '../src/lib/agent-tools.js';
+import {
+  analyzeBinaryStructure,
+  executeTool,
+  shouldRunBinaryPreflight,
+  type ToolContext,
+} from '../src/lib/agent-tools.js';
+import { buildDemoBufferLines } from '../src/lib/commit-gate-fixtures.js';
+import { demoReplyToWrite } from '../src/lib/demo.js';
 import type { DataLine } from '../src/lib/types.js';
 
 const TOOL_USE_ID = 'toolu_test_01';
@@ -104,6 +111,26 @@ describe('analyze_binary_structure — Modbus RTU', () => {
     const parsed = JSON.parse(raw);
     expect(parsed.printable_ratio).toBeGreaterThan(0.9);
     expect(parsed.is_likely_binary).toBe(false);
+  });
+
+  it('ignores TX polls so mixed demo buffers still CRC as 25-byte responses', () => {
+    const lines = buildDemoBufferLines('modbus-plc', 8);
+    expect(lines.some((l) => l.direction === 'tx')).toBe(true);
+    expect(shouldRunBinaryPreflight(lines)).toBe(true);
+    const parsed = analyzeBinaryStructure(lines);
+    expect(parsed.frame_analysis).toMatchObject({ likely_frame_length: 25 });
+    expect((parsed.modbus_crc_check as { validity_ratio: number }).validity_ratio).toBe(1);
+  });
+});
+
+describe('demoReplyToWrite', () => {
+  it('returns a CRC-valid read-holding response for a Modbus demo poll', () => {
+    const tx = [0x01, 0x03, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00];
+    const reply = demoReplyToWrite('demo://modbus-plc', tx);
+    expect(reply).not.toBeNull();
+    expect(reply![0]).toBe(0x01);
+    expect(reply![1]).toBe(0x03);
+    expect(reply!.length).toBe(25);
   });
 });
 

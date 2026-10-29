@@ -203,7 +203,7 @@
       </div>
 
     {:else}
-      <div class="idle-state">Click <strong>Analyze</strong> or toggle <strong>⚡ Live</strong> to run Protocol Detective.</div>
+      <div class="idle-state">Click <strong>Investigate</strong> (verified gate) or <strong>Naive Analyze</strong> to identify the stream.</div>
     {/if}
   </div>
 </div>

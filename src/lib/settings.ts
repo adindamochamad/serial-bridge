@@ -1,5 +1,5 @@
+import { invoke } from '@tauri-apps/api/core';
 import { Store } from '@tauri-apps/plugin-store';
-import { KUNCI_META_MODEL_API_DEFAULT } from './konfigurasi-default-cas.js';
 import { metaKeyClass, usableMetaKey } from './meta-api.js';
 
 export { metaKeyClass, usableMetaKey };
@@ -8,41 +8,35 @@ const STORE_FILE = 'serialbridge.settings.json';
 const KEY_API_KEY = 'meta_model_api_key';
 const KEY_API_KEY_LEGACY = 'anthropic_api_key';
 
-let _store: Store | null = null;
-let _sudahSeedDefault = false;
-let _dihapusUser = false;
+let _migrateDone = false;
 
-async function getStore(): Promise<Store> {
-  if (!_store) {
-    _store = await Store.load(STORE_FILE);
-  }
-  return _store;
-}
-
-export async function getApiKey(): Promise<string | null> {
+async function migrateLegacyApiKeyFromStore(): Promise<void> {
+  if (_migrateDone) return;
+  _migrateDone = true;
   try {
-    const store = await getStore();
+    const store = await Store.load(STORE_FILE);
     const stored = await store.get<string>(KEY_API_KEY);
     const legacy = await store.get<string>(KEY_API_KEY_LEGACY);
-    const chosen = usableMetaKey(stored) ?? usableMetaKey(legacy);
-    if (chosen) return chosen;
-
-    if (usableMetaKey(KUNCI_META_MODEL_API_DEFAULT) && !_sudahSeedDefault && !_dihapusUser) {
-      _sudahSeedDefault = true;
-      const seeded = usableMetaKey(KUNCI_META_MODEL_API_DEFAULT)!;
-      await store.set(KEY_API_KEY, seeded);
+    const key = usableMetaKey(stored) ?? usableMetaKey(legacy);
+    if (key) {
+      await invoke('meta_set_api_key', { key });
+      await store.delete(KEY_API_KEY);
+      await store.delete(KEY_API_KEY_LEGACY);
       await store.save();
-      return seeded;
     }
   } catch {
-    // store tidak tersedia (mis. preview browser)
+    // store or invoke unavailable (browser preview)
   }
+}
 
-  const fromEnv = usableMetaKey(KUNCI_META_MODEL_API_DEFAULT);
-  if (fromEnv && !_dihapusUser) {
-    return fromEnv;
+export async function hasApiKey(): Promise<boolean> {
+  await migrateLegacyApiKeyFromStore();
+  try {
+    const status = await invoke<{ configured: boolean }>('meta_key_status');
+    return status.configured;
+  } catch {
+    return false;
   }
-  return null;
 }
 
 export async function setApiKey(key: string): Promise<void> {
@@ -52,15 +46,9 @@ export async function setApiKey(key: string): Promise<void> {
       'That key is not a Meta Model API key. Paste a Standard key from dev.meta.ai. It starts with LLM_.',
     );
   }
-  const store = await getStore();
-  await store.set(KEY_API_KEY, usable);
-  await store.save();
-  _dihapusUser = false;
+  await invoke('meta_set_api_key', { key: usable });
 }
 
 export async function clearApiKey(): Promise<void> {
-  const store = await getStore();
-  await store.delete(KEY_API_KEY);
-  await store.save();
-  _dihapusUser = true;
+  await invoke('meta_clear_api_key');
 }

@@ -65,6 +65,19 @@ impl PolicyEngine {
         }
     }
 
+    /// Payload rules for operator-initiated writes: deny-list and size only.
+    /// Does not apply rate limits, session blocks, or approval requirements.
+    pub fn evaluate_human_send_bytes(&self, payload: &[u8]) -> Decision {
+        if self.policy_invalid {
+            return Decision::Allow;
+        }
+        let policy = self
+            .policy
+            .as_ref()
+            .expect("policy present when not invalid");
+        policy::evaluate(policy, "send_bytes", payload)
+    }
+
     pub fn evaluate(&mut self, tool: &str, payload: &[u8], now_ms: u64) -> Decision {
         if self.policy_invalid {
             if known_read_tool(tool) {
@@ -222,8 +235,10 @@ mod tests {
 
     #[test]
     fn load_invalid_file_is_fail_closed() {
-        let dir =
-            std::env::temp_dir().join(format!("omnibridge-safemode-engine-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "serialbridge-safemode-engine-{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("safemode-policy.json");
         std::fs::write(&path, "not-json").unwrap();

@@ -1,4 +1,6 @@
-# OmniBridge Safe Mode — rencana implementasi
+# SerialBridge Safe Mode — implementation plan
+
+> Historical product name: OmniBridge.
 
 Sumber spec: `/Users/mac/Development/omnibridge-safe-mode-prd-v2.md` (Draft v2, 8 Okt 2026).
 Repo: `/Users/mac/Development/OmniBridge` (GitHub `adindamochamad/omnibridge`).

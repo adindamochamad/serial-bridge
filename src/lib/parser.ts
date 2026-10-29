@@ -93,8 +93,11 @@ function coerce(raw: string, dataType?: AnalysisField['data_type']): LiveValuePr
   return raw;
 }
 
-export function parseStream(lines: DataLine[], fields: AnalysisField[]): ParsedStream {
-  const compiledRegex = compileFields(fields);
+export function parseStreamWithCompiled(
+  lines: DataLine[],
+  fields: AnalysisField[],
+  compiledRegex: Record<string, RegExp | null>
+): ParsedStream {
   const history: Record<string, LiveValue[]> = {};
   let parsableFieldCount = 0;
 
@@ -126,6 +129,10 @@ export function parseStream(lines: DataLine[], fields: AnalysisField[]): ParsedS
   }
 
   return { history, compiledRegex, parsableFieldCount };
+}
+
+export function parseStream(lines: DataLine[], fields: AnalysisField[]): ParsedStream {
+  return parseStreamWithCompiled(lines, fields, compileFields(fields));
 }
 
 export function latest(history: LiveValue[]): LiveValue | null {

@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { getApiKey, setApiKey, clearApiKey } from '$lib/settings.js';
+  import { hasApiKey, setApiKey, clearApiKey } from '$lib/settings.js';
   import { getAllProfiles, clearAllProfiles, exportProfilesJson, importProfilesJson } from '$lib/profiles.js';
   import { downloadFile } from '$lib/export.js';
   import AuditLogPanel from '$lib/AuditLogPanel.svelte';
-  import versiPkg from '../../package.json';
+  import pkgVersion from '../../package.json';
   import { invoke } from '@tauri-apps/api/core';
-  import { createMetaModelClient, META_MODEL_SPARK } from '$lib/meta-api.js';
+  import { metaCountTokens, META_MODEL_SPARK } from '$lib/meta-api.js';
 
   let { onClose, onProfilesChanged }: { onClose: () => void; onProfilesChanged?: () => void } = $props();
 
@@ -15,7 +15,7 @@
   let testing = $state(false);
   let testResult = $state<{ ok: boolean; message: string } | null>(null);
   let profileCount = $state(0);
-  let keySource = $state<'store' | 'env' | 'none'>('none');
+  let keySource = $state<'store' | 'none'>('none');
 
   $effect(() => {
     load();
@@ -24,17 +24,10 @@
   async function load() {
     await loadSafeMode();
     try {
-      const envKey = (import.meta.env.VITE_META_MODEL_API_KEY as string) || '';
-      const stored = await getApiKey();
-      if (stored) {
-        apiKey = stored;
-        keySource = stored === envKey && envKey ? 'env' : 'store';
-      } else if (envKey) {
-        apiKey = envKey;
-        keySource = 'env';
-      }
+      keySource = (await hasApiKey()) ? 'store' : 'none';
+      apiKey = '';
     } catch {
-      // fall through
+      keySource = 'none';
     }
     try {
       const profiles = await getAllProfiles();
@@ -50,7 +43,8 @@
     try {
       await setApiKey(apiKey.trim());
       keySource = 'store';
-      testResult = { ok: true, message: 'Saved to app data store' };
+      apiKey = '';
+      testResult = { ok: true, message: 'Saved in Rust host (not shown in the UI)' };
     } catch (e) {
       testResult = { ok: false, message: String(e) };
     } finally {
@@ -59,17 +53,23 @@
   }
 
   async function handleTest() {
-    if (!apiKey.trim()) return;
     testing = true;
     testResult = null;
     try {
-      const client = createMetaModelClient(apiKey.trim());
-      const res = await client.models.list();
-      const ids = (res.data ?? []).map((m) => m.id);
-      const spark = ids.includes(META_MODEL_SPARK) ? ` · ${META_MODEL_SPARK} listed` : '';
+      if (apiKey.trim()) {
+        await setApiKey(apiKey.trim());
+        keySource = 'store';
+        apiKey = '';
+      } else if (!(await hasApiKey())) {
+        testResult = { ok: false, message: 'Paste a key or save one first.' };
+        return;
+      }
+      const counted = await metaCountTokens({
+        messages: [{ role: 'user', content: 'SerialBridge connection test' }],
+      });
       testResult = {
         ok: true,
-        message: `✓ Meta Model API — ${ids.length} models${spark}. Use Standard muse-spark-1.3, not contributor.`,
+        message: `✓ Meta Model API (${META_MODEL_SPARK}) — ${counted.input_tokens} input tokens counted.`,
       };
     } catch (e: any) {
       const msg = e?.message ?? String(e);
@@ -257,8 +257,6 @@
           <span>Meta Model API Key</span>
           {#if keySource === 'store'}
             <span class="source-tag store">stored</span>
-          {:else if keySource === 'env'}
-            <span class="source-tag env">from .env</span>
           {:else}
             <span class="source-tag none">not set</span>
           {/if}
@@ -289,7 +287,7 @@
 
         <div class="help-text">
           Create a key at <span class="link">dev.meta.ai</span> (Model API dashboard).
-          Use <strong>muse-spark-1.3</strong> Standard. Keys stay in local app data.
+          Use <strong>muse-spark-1.3</strong> Standard. Keys are stored only in the Rust host (never in the WebView).
         </div>
 
         {#if testResult}
@@ -297,7 +295,11 @@
         {/if}
 
         <div class="button-row">
-          <button class="btn secondary" onclick={handleTest} disabled={testing || !apiKey.trim()}>
+          <button
+            class="btn secondary"
+            onclick={handleTest}
+            disabled={testing || (!apiKey.trim() && keySource !== 'store')}
+          >
             {testing ? 'Testing…' : 'Test connection'}
           </button>
           <button class="btn primary" onclick={handleSave} disabled={saving || !apiKey.trim()}>
@@ -445,7 +447,7 @@
           <div class="about-name">SerialBridge</div>
           <div class="about-tagline">Intelligent Serial Gateway · AI-powered protocol detection</div>
           <div class="about-meta">
-            <span>v{versiPkg.version}</span>
+            <span>v{pkgVersion.version}</span>
             <span>·</span>
             <span>Tauri 2 + Svelte 5</span>
             <span>·</span>
@@ -545,7 +547,6 @@
   }
 
   .source-tag.store { background: #0e2018; color: #4ade80; border: 1px solid #1e4028; }
-  .source-tag.env { background: #1e1e3a; color: #a78bfa; border: 1px solid #3a2e5a; }
   .source-tag.none { background: #2a1e1e; color: #f87171; border: 1px solid #4a2e2e; }
 
   .safe-mode-help code {

@@ -24,7 +24,9 @@ export interface DeviceProfile {
   notes: string;
   /** Timbangan CAS butuh warmup baud 19200 → 9600 saat sesi pertama. */
   needs_baud_warmup?: boolean;
-  /** Asal profil: 'bundled' dari repo, 'learned' dari analisis AI. */
+  /** Profile origin. */
+  source?: 'bundled' | 'learned';
+  /** @deprecated persisted alias for `source` — still written so older builds can read it. */
   sumber?: 'bundled' | 'learned';
   first_learned_at: number;
   last_seen_at: number;
@@ -39,10 +41,21 @@ async function getStore(): Promise<Store> {
   return _store;
 }
 
+function normalizeProfile(profile: DeviceProfile): DeviceProfile {
+  const source = profile.source ?? profile.sumber;
+  if (!source) return profile;
+  return { ...profile, source, sumber: source };
+}
+
 export async function getAllProfiles(): Promise<Record<string, DeviceProfile>> {
   try {
     const store = await getStore();
-    return (await store.get<Record<string, DeviceProfile>>(KEY_PROFILES)) ?? {};
+    const all = (await store.get<Record<string, DeviceProfile>>(KEY_PROFILES)) ?? {};
+    const normalized: Record<string, DeviceProfile> = {};
+    for (const [key, profile] of Object.entries(all)) {
+      normalized[key] = normalizeProfile(profile);
+    }
+    return normalized;
   } catch {
     return {};
   }
@@ -81,6 +94,7 @@ export async function saveProfile(
     command_presets: analysis.command_presets ?? existing?.command_presets ?? [],
     notes: analysis.notes,
     needs_baud_warmup: existing?.needs_baud_warmup,
+    source: 'learned',
     sumber: 'learned',
     first_learned_at: existing?.first_learned_at ?? now,
     last_seen_at: now,
@@ -171,12 +185,12 @@ export function parseProfileExport(json: string): DeviceProfile[] {
   try {
     parsed = JSON.parse(json);
   } catch {
-    throw new Error('File bukan JSON yang valid');
+    throw new Error('File is not valid JSON');
   }
 
-  let kandidat: unknown[];
+  let candidates: unknown[];
   if (Array.isArray(parsed)) {
-    kandidat = parsed;
+    candidates = parsed;
   } else if (
     parsed &&
     typeof parsed === 'object' &&
@@ -186,14 +200,14 @@ export function parseProfileExport(json: string): DeviceProfile[] {
     if (bundle.app && bundle.app !== 'serialbridge') {
       throw new Error('Profile export is not from SerialBridge');
     }
-    kandidat = bundle.profiles;
+    candidates = bundle.profiles;
   } else {
     throw new Error('Unrecognized export format — expected a SerialBridge bundle or profile array');
   }
 
-  const valid = kandidat.filter(isValidProfile);
+  const valid = candidates.filter(isValidProfile);
   if (valid.length === 0) {
-    throw new Error('Tidak ada profil valid di file');
+    throw new Error('No valid profiles in file');
   }
   return valid;
 }
@@ -204,11 +218,11 @@ export function mergeProfileMaps(
   incoming: DeviceProfile[],
   mode: 'merge' | 'replace'
 ): Record<string, DeviceProfile> {
-  const hasil = mode === 'replace' ? {} : { ...existing };
-  for (const profil of incoming) {
-    hasil[profil.fingerprint] = profil;
+  const merged = mode === 'replace' ? {} : { ...existing };
+  for (const profile of incoming) {
+    merged[profile.fingerprint] = profile;
   }
-  return hasil;
+  return merged;
 }
 
 export async function exportProfilesJson(): Promise<string> {

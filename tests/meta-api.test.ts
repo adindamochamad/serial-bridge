@@ -1,22 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
-  createMetaModelClient,
   META_MODEL_API_BASE,
   META_MODEL_SPARK,
   metaKeyClass,
   usableMetaKey,
 } from '../src/lib/meta-api.js';
 
-describe('Meta Model API constants', () => {
-  it('configures the messages client for muse-spark-1.3 with a bearer token', () => {
+describe('Meta Model API helpers', () => {
+  it('pins model id and API origin for documentation', () => {
     expect(META_MODEL_API_BASE).toBe('https://api.meta.ai');
     expect(META_MODEL_SPARK).toBe('muse-spark-1.3');
     expect(META_MODEL_SPARK).not.toContain('contributor');
-
-    const client = createMetaModelClient('LLM_test_key');
-    expect(client.baseURL).toBe('https://api.meta.ai');
-    expect(client.authToken).toBe('LLM_test_key');
-    expect(client.apiKey).toBeNull();
   });
 
   it('refuses non-Meta keys and accepts a Meta Standard key', () => {

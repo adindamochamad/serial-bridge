@@ -1,10 +1,10 @@
 # Safe Mode — repo notes
 
-Last verified on the **current working tree** after M4 (audit log + Safe Mode toggle). Baseline PRD commit was `075b35e`; line numbers below drift with edits.
+Last verified on the **current working tree** after **M5** (prompt-injection demo, docs, tests). Baseline PRD commit was `075b35e`; line numbers below drift with edits.
 
-Locked decisions: [omnibridge-safe-mode-plan.md](./omnibridge-safe-mode-plan.md). PRD copy: [omnibridge-safe-mode-prd.md](./omnibridge-safe-mode-prd.md).
+Locked decisions: [serialbridge-safe-mode-plan.md](./serialbridge-safe-mode-plan.md). PRD copy: [serialbridge-safe-mode-prd.md](./serialbridge-safe-mode-prd.md). (Historical name: OmniBridge.)
 
-## §2.1 fact table (post-M4)
+## §2.1 fact table (post-M5)
 
 | Area | Fact |
 |------|------|
@@ -17,21 +17,23 @@ Locked decisions: [omnibridge-safe-mode-plan.md](./omnibridge-safe-mode-plan.md)
 | Invalid policy | Known read tools stay allowed. `send_bytes` is denied. Unknown tools are denied. |
 | Approval UI | `ApprovalDialog.svelte` on `+page.svelte`. |
 | Safe Mode toggle | `SettingsModal.svelte`. Off requires confirm text `MATIKAN`. Missing enabled file means **on**. State file: `<app_config_dir>/safemode-enabled.json`. |
+| Demo injection | `prompt-injection` scenario in `demo.ts`; gate `demo://` → `simulated: true` on approve; [DEMO_SCRIPT.md](./DEMO_SCRIPT.md), [README.md](./README.md). |
 | Audit UI | `AuditLogPanel.svelte` inside Settings. Read-only, filter by event and port. |
 | Capabilities | [`default.json`](../../src-tauri/capabilities/default.json): **`core:default`**, **`opener:default`**, **`store:default`**. **`tauri_plugin_serialplugin::init()`** still registered. `rg serialplugin src` is empty. |
 | Paths | Policy: `<app_config_dir>/safemode-policy.json`. Audit: `<app_data_dir>/safemode-audit.jsonl`. |
-| Tests / CI | Vitest includes `safemode`. Rust covers policy, gate, approval, audit chain, FR-9 reasons, toggle confirm + audit event. CI: `cargo fmt`, clippy `-D warnings`, `cargo test`, `npm run check`, `npm test`, `npm run build`. |
+| Tests / CI | Vitest: `safemode`, `demo` (injection line), `agent-tools` (no `send_bytes_to_port`). Rust: policy, gate (incl. demo simulated), approval, audit, FR-9, toggle. CI: `cargo fmt`, clippy `-D warnings`, `cargo test`, `npm run check`, `npm test`, `npm run build`. |
 | CSP | `tauri.conf.json`: `"csp": null`. |
 
 ## Differences from original M0 snapshot
 
-| Topic | M0 / PRD §2.1 | Post-M4 |
+| Topic | M0 / PRD §2.1 | Post-M5 |
 |-------|----------------|---------|
 | Agent `send_bytes` | Direct `send_bytes_to_port` | Gated `safemode_agent_send_bytes` + approval dialog |
 | `toolUseId` | Not wired | `tu.id` → gate |
 | Capabilities | `serialplugin:default` + `allow-available-ports` | Removed; plugin `init()` remains |
 | Safe Mode modules | Not present | `safemode/*` including `gate.rs` and `audit.rs` |
 | Audit view | Not present | `AuditLogPanel.svelte` in Settings |
+| Demo injection fixture | Not present | `prompt-injection` scenario, M5 tests, [DEMO_SCRIPT.md](./DEMO_SCRIPT.md) |
 
 ## M0.2 — `serialplugin` (reconfirmed after M2.4)
 
@@ -63,6 +65,7 @@ Approved M0 list **plus** `src-tauri/src/safemode/gate.rs` (commands, state, app
 | Webhook forward | | | |
 | Demo virtual port | | | |
 | One-shot analysis | | | |
-| Agent Investigate + Safe Mode gate | | | Approve/Deny dialog; no silent agent write |
-| Approval timeout / queue | | | Two requests one dialog at a time |
-| Audit panel + Safe Mode toggle | | | Settings; disable requires `MATIKAN` |
+| Agent Investigate + Safe Mode gate | auto | auto | Vitest + Rust gate tests; manual: [DEMO_SCRIPT.md](./DEMO_SCRIPT.md) |
+| Approval timeout / queue | auto | auto | Rust `approval.rs` tests |
+| Audit panel + Safe Mode toggle | auto | auto | Rust toggle test; manual UI smoke |
+| Prompt injection demo | auto | auto | `tests/demo.test.ts`, Rust demo simulated write |

@@ -221,7 +221,11 @@ mod tests {
     use std::fs;
 
     fn temp_audit_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("omnibridge-audit-{}-{}", name, std::process::id()))
+        std::env::temp_dir().join(format!(
+            "serialbridge-audit-{}-{}",
+            name,
+            std::process::id()
+        ))
     }
 
     #[test]

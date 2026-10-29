@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  apakahAdaptorCh340,
-  apakahPerangkatCas,
-  resetWarmupCas,
+  isCh340Adapter,
+  isCasDevice,
+  resetCasWarmup,
 } from '../src/lib/cas-scale.js';
 import type { DiscoveredDevice } from '../src/lib/types.js';
 
-function deviceContoh(patch: Partial<DiscoveredDevice> = {}): DiscoveredDevice {
+function sampleDevice(patch: Partial<DiscoveredDevice> = {}): DiscoveredDevice {
   return {
     port: 'COM3',
     device_class: 'unknown',
@@ -21,23 +21,23 @@ function deviceContoh(patch: Partial<DiscoveredDevice> = {}): DiscoveredDevice {
   };
 }
 
-describe('apakahAdaptorCh340', () => {
-  it('mengenali device_class ch340', () => {
-    expect(apakahAdaptorCh340(deviceContoh({ device_class: 'ch340' }))).toBe(true);
+describe('isCh340Adapter', () => {
+  it('recognizes device_class ch340', () => {
+    expect(isCh340Adapter(sampleDevice({ device_class: 'ch340' }))).toBe(true);
   });
 
-  it('mengenali VID WCH 0x1A86', () => {
-    expect(apakahAdaptorCh340(deviceContoh({ vid: 0x1a86 }))).toBe(true);
+  it('recognizes WCH VID 0x1A86', () => {
+    expect(isCh340Adapter(sampleDevice({ vid: 0x1a86 }))).toBe(true);
   });
 });
 
-describe('apakahPerangkatCas', () => {
-  beforeEach(() => resetWarmupCas());
+describe('isCasDevice', () => {
+  beforeEach(() => resetCasWarmup());
 
-  it('mengenali COM3 CH340 sebagai timbangan CAS', () => {
+  it('treats COM3 CH340 as a CAS scale', () => {
     expect(
-      apakahPerangkatCas(
-        deviceContoh({
+      isCasDevice(
+        sampleDevice({
           port: 'COM3',
           device_class: 'ch340',
           label: 'CH340/CH341',
@@ -47,10 +47,10 @@ describe('apakahPerangkatCas', () => {
     ).toBe(true);
   });
 
-  it('tidak mengenali port generik tanpa CAS/CH340', () => {
+  it('does not treat a generic FTDI port as CAS', () => {
     expect(
-      apakahPerangkatCas(
-        deviceContoh({
+      isCasDevice(
+        sampleDevice({
           device_class: 'ftdi_adapter',
           manufacturer: 'FTDI',
           product: 'FT232R',

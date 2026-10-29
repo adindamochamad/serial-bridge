@@ -145,7 +145,7 @@ function modbusCrc16(data: number[]): number {
 }
 
 /** Per-line Modbus CRC16. Each demo line is one frame. */
-export function bufferModbusCrcRatio(lines: Array<{ hex: string }>): {
+export function bufferModbusCrcRatio(lines: Array<{ hex: string; direction?: string }>): {
   frames: number;
   valid: number;
   ratio: number;
@@ -153,6 +153,7 @@ export function bufferModbusCrcRatio(lines: Array<{ hex: string }>): {
   let frames = 0;
   let valid = 0;
   for (const line of lines) {
+    if (line.direction === 'tx') continue;
     const bytes = line.hex
       .split(/\s+/)
       .filter(Boolean)
@@ -244,24 +245,26 @@ export function buildDemoBufferLines(
   const lines: DataLine[] = [];
   let seq = 0;
   for (let i = 0; i < lineCount; i++) {
-    const bytes = scenario.generate();
-    let hex = Array.from(bytes)
-      .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
-      .join(' ');
-    if (options?.breakCrc && scenarioId === 'modbus-plc') {
-      hex = breakTrailingCrc(hex);
+    for (const chunk of scenario.generate()) {
+      let hex = Array.from(chunk.bytes)
+        .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
+        .join(' ');
+      if (options?.breakCrc && scenarioId === 'modbus-plc' && chunk.direction === 'rx') {
+        hex = breakTrailingCrc(hex);
+      }
+      const shown = hex.split(/\s+/).filter(Boolean).map((part) => Number.parseInt(part, 16));
+      const ascii = shown
+        .map((b) => (b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : '·'))
+        .join('');
+      lines.push({
+        id: ++seq,
+        timestamp: Date.now() + i,
+        hex,
+        ascii,
+        bytes: shown.length,
+        direction: chunk.direction,
+      });
     }
-    const shown = hex.split(/\s+/).filter(Boolean).map((part) => Number.parseInt(part, 16));
-    const ascii = shown
-      .map((b) => (b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : '·'))
-      .join('');
-    lines.push({
-      id: ++seq,
-      timestamp: Date.now() + i,
-      hex,
-      ascii,
-      bytes: shown.length,
-    });
   }
   return lines;
 }

@@ -1,15 +1,34 @@
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
 import { invoke } from '@tauri-apps/api/core';
-import { applyCommitGate } from './commit-gate.js';
-import { AGENT_TOOLS, executeTool, type ToolContext } from './agent-tools.js';
+import { applyCommitGate, collectToolEvidence } from './commit-gate.js';
 import {
-  getMetaModelClient,
+  AGENT_TOOLS,
+  analyzeBinaryStructure,
+  executeTool,
+  shouldRunBinaryPreflight,
+  type ToolContext,
+} from './agent-tools.js';
+import {
+  DESKTOP_REQUIRED_MSG,
   META_MODEL_SPARK,
   MUSE_SPARK_PRICING_USD_PER_MTOK,
-  resetMetaModelClient,
+  metaMessagesCreate,
 } from './meta-api.js';
-import { getApiKey } from './settings.js';
+import { hasApiKey } from './settings.js';
 import type { DataLine, DiscoveredDevice } from './types.js';
+
+type CachedSystemTextBlock = Anthropic.Messages.TextBlockParam & {
+  cache_control?: { type: 'ephemeral' };
+};
+
+type UsageWithPromptCache = Anthropic.Messages.Usage & {
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+};
+
+function cachedSystemPrompt(text: string): CachedSystemTextBlock[] {
+  return [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
+}
 
 export interface AnalysisField {
   name: string;
@@ -64,7 +83,7 @@ export interface ProtocolAnalysis {
   evidence_summary?: string;
 }
 
-const SYSTEM_PROMPT = `You are Protocol Detective, an expert serial communication protocol analyzer embedded in SerialBridge — a desktop serial gateway for legacy hardware.
+const SYSTEM_PROMPT = `You are a serial protocol analyst embedded in SerialBridge — a desktop serial gateway for legacy hardware.
 
 Your mission: analyze raw serial byte streams and identify communication protocols, extract structured data fields, and provide actionable device insights.
 
@@ -152,12 +171,16 @@ Rules:
 - Never output anything outside the JSON object
 - If data looks like multiple packet types, analyze the dominant pattern`;
 
-function getClient(apiKey: string): Anthropic {
-  return getMetaModelClient(apiKey);
+export function resetClient() {
+  /* Key and HTTP client live in the Rust host. */
 }
 
-export function resetClient() {
-  resetMetaModelClient();
+async function requireMetaHost(): Promise<void> {
+  if (!(await hasApiKey())) {
+    throw new Error(
+      'No Meta Model API key. Open Settings and paste a Standard key from dev.meta.ai. It starts with LLM_.',
+    );
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -191,10 +214,7 @@ export async function askAboutBuffer(
   ctx: AskContext,
   onChunk?: (chunk: string) => void
 ): Promise<string> {
-  const apiKey = await getApiKey();
-  if (!apiKey) throw new Error('No Meta Model API key. Open Settings and paste a Standard key from dev.meta.ai. It starts with LLM_.');
-
-  const client = getClient(apiKey);
+  await requireMetaHost();
 
   // Take last 80 lines as context — enough to answer most questions, small
   // enough to keep latency low and cost reasonable.
@@ -229,36 +249,29 @@ USER QUESTION: ${ctx.question}`;
   }
   messages.push({ role: 'user', content: userContent });
 
-  const stream = client.messages.stream({
-    model: META_MODEL_SPARK,
-    max_tokens: 1024,
-    thinking: { type: 'adaptive' },
-    system: [
-      {
-        type: 'text',
-        text: SYSTEM_PROMPT_ASK,
-        // @ts-ignore — cache_control not in older type defs
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    messages,
-  });
-
-  let fullText = '';
-  for await (const event of stream) {
-    if (
-      event.type === 'content_block_delta' &&
-      'delta' in event &&
-      event.delta &&
-      (event.delta as { type?: string }).type === 'text_delta'
-    ) {
-      const chunk = (event.delta as { text: string }).text;
-      fullText += chunk;
-      onChunk?.(chunk);
+  let response: Anthropic.Messages.Message;
+  try {
+    response = await metaMessagesCreate({
+      max_tokens: 1024,
+      thinking: { type: 'adaptive' },
+      system: cachedSystemPrompt(SYSTEM_PROMPT_ASK),
+      messages,
+    });
+  } catch (e) {
+    const msg = friendlyError(e);
+    if (/invoke|desktop|tauri/i.test(msg)) {
+      throw new Error(DESKTOP_REQUIRED_MSG);
     }
+    throw new Error(msg);
   }
 
-  return fullText.trim();
+  const textBlock = response.content.find((b) => b.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') {
+    throw new Error('No text response from the model');
+  }
+  const fullText = textBlock.text.trim();
+  if (fullText) onChunk?.(fullText);
+  return fullText;
 }
 
 /** Turn SDK / network errors into short, user-readable strings.
@@ -299,10 +312,7 @@ export async function analyzeStream(
   linesForGate?: DataLine[],
   extraInstruction?: string
 ): Promise<ProtocolAnalysis> {
-  const apiKey = await getApiKey();
-  if (!apiKey) throw new Error('No Meta Model API key. Open Settings and paste a Standard key from dev.meta.ai. It starts with LLM_.');
-
-  const client = getClient(apiKey);
+  await requireMetaHost();
 
   const hexPreview = hexSamples.slice(-30).join('\n');
   const asciiPreview = asciiSamples.slice(-30).join('\n');
@@ -320,22 +330,12 @@ Identify the protocol and extract all structured data fields.${
     extraInstruction ? `\n\n${extraInstruction}` : ''
   }`;
 
-  const stream = client.messages.stream({
-    model: META_MODEL_SPARK,
+  const response = await metaMessagesCreate({
     max_tokens: 8192,
     thinking: { type: 'adaptive' },
-    system: [
-      {
-        type: 'text',
-        text: SYSTEM_PROMPT,
-        // @ts-ignore — cache_control is valid but may not be in older type defs
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
+    system: cachedSystemPrompt(SYSTEM_PROMPT),
     messages: [{ role: 'user', content: userContent }],
   });
-
-  const response = await stream.finalMessage();
 
   // Check if response was truncated (hit max_tokens)
   if (response.stop_reason === 'max_tokens') {
@@ -379,7 +379,7 @@ Identify the protocol and extract all structured data fields.${
 //  AGENT MODE — multi-step investigation with tool use
 // ═══════════════════════════════════════════════════════════════════════════
 
-const SYSTEM_PROMPT_AGENT = `You are Protocol Detective, operating in AGENT mode inside SerialBridge — a desktop serial gateway.
+const SYSTEM_PROMPT_AGENT = `You are a serial protocol analyst operating in AGENT mode inside SerialBridge — a desktop serial gateway.
 
 Your job: investigate unknown serial devices by iteratively using your tools to build confidence in a protocol identification. Unlike one-shot analysis, you can explore, verify hypotheses, and cross-reference metadata before committing to an answer.
 
@@ -527,12 +527,11 @@ function emptyUsage(): UsageStats {
 
 function addUsageFromResponse(acc: UsageStats, u: Anthropic.Messages.Usage | undefined): void {
   if (!u) return;
-  acc.input_tokens += u.input_tokens ?? 0;
-  acc.output_tokens += u.output_tokens ?? 0;
-  // @ts-ignore — cache_* fields may not be in older SDK types
-  acc.cache_read_tokens += (u.cache_read_input_tokens as number | undefined) ?? 0;
-  // @ts-ignore
-  acc.cache_write_tokens += (u.cache_creation_input_tokens as number | undefined) ?? 0;
+  const usage = u as UsageWithPromptCache;
+  acc.input_tokens += usage.input_tokens ?? 0;
+  acc.output_tokens += usage.output_tokens ?? 0;
+  acc.cache_read_tokens += usage.cache_read_input_tokens ?? 0;
+  acc.cache_write_tokens += usage.cache_creation_input_tokens ?? 0;
 
   acc.estimated_cost_usd =
     (acc.input_tokens * PRICING_USD_PER_MTOK.input) / 1_000_000 +
@@ -568,8 +567,7 @@ export async function analyzeWithAgent(
   ctx: AgentContext,
   onStep?: (step: AgentStep) => void
 ): Promise<AgentResult> {
-  const apiKey = await getApiKey();
-  if (!apiKey) {
+  if (!(await hasApiKey())) {
     return {
       trace: [],
       analysis: null,
@@ -580,7 +578,6 @@ export async function analyzeWithAgent(
     };
   }
 
-  const client = getClient(apiKey);
   const trace: AgentStep[] = [];
   let apiCalls = 0;
   const usage = emptyUsage();
@@ -606,6 +603,23 @@ export async function analyzeWithAgent(
   const asciiSample = ctx.lines.slice(-20).map((l) => l.ascii).join('\n');
   const deviceContext = ctx.deviceClass ? `Device classification hint: ${ctx.deviceClass}\n` : '';
 
+  const runPreflight = shouldRunBinaryPreflight(ctx.lines);
+  let preflightOutput: string | null = null;
+  if (runPreflight) {
+    const result = analyzeBinaryStructure(ctx.lines);
+    preflightOutput = JSON.stringify(result);
+    emit({
+      type: 'tool_call',
+      tool_name: 'analyze_binary_structure',
+      tool_input: { hypothesis: 'host preflight: RX stream structure (not a model call)' },
+    });
+    emit({
+      type: 'tool_result',
+      tool_name: 'analyze_binary_structure',
+      tool_output: preflightOutput,
+    });
+  }
+
   const initialUserContent = `${deviceContext}Investigate this serial stream (${ctx.lines.length} total lines buffered, showing 20 most recent).
 
 HEX:
@@ -613,7 +627,11 @@ ${hexSample}
 
 ASCII:
 ${asciiSample}
-
+${
+    preflightOutput
+      ? `\nHost already ran analyze_binary_structure on RX bytes (result below). Use it as evidence. Call more tools if needed, then emit final JSON.\n${preflightOutput}\n`
+      : ''
+  }
 Use your tools to investigate as needed. Begin investigation now.${
     ctx.denyTransmit
       ? ' This run must not transmit. If the frames look like Modbus, name Modbus RTU and include command_presets with at least one name even when CRC validity is below 0.9. The app withholds those commands.'
@@ -638,22 +656,13 @@ Use your tools to investigate as needed. Begin investigation now.${
 
     let response: Anthropic.Messages.Message;
     try {
-      const stream = client.messages.stream({
-        model: META_MODEL_SPARK,
+      response = await metaMessagesCreate({
         max_tokens: 8192,
         thinking: { type: 'adaptive' },
-        system: [
-          {
-            type: 'text',
-            text: SYSTEM_PROMPT_AGENT,
-            // @ts-ignore — cache_control may not be in older type defs
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
+        system: cachedSystemPrompt(SYSTEM_PROMPT_AGENT),
         tools: AGENT_TOOLS,
         messages,
       });
-      response = await stream.finalMessage();
     } catch (e) {
       const friendly = friendlyError(e);
       emit({ type: 'error', error: friendly });
@@ -762,7 +771,26 @@ Use your tools to investigate as needed. Begin investigation now.${
 
       try {
         const raw = JSON.parse(text.slice(firstBrace, lastBrace + 1)) as ProtocolAnalysis;
-        const gated = applyCommitGate(raw, ctx.lines, trace, 'verified');
+        let gated = applyCommitGate(raw, ctx.lines, trace, 'verified');
+        const evidence = collectToolEvidence(trace);
+        if (
+          !gated.committed &&
+          evidence.binaryStructureCalls === 0 &&
+          shouldRunBinaryPreflight(ctx.lines)
+        ) {
+          const fallback = JSON.stringify(analyzeBinaryStructure(ctx.lines));
+          emit({
+            type: 'tool_call',
+            tool_name: 'analyze_binary_structure',
+            tool_input: { hypothesis: 'host fallback: CRC evidence before commit' },
+          });
+          emit({
+            type: 'tool_result',
+            tool_name: 'analyze_binary_structure',
+            tool_output: fallback,
+          });
+          gated = applyCommitGate(raw, ctx.lines, trace, 'verified');
+        }
         const analysis = gated.analysis;
         emit({
           type: 'final',

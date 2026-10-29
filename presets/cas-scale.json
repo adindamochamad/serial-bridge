@@ -52,16 +52,15 @@
   },
   "webhook": {
     "enabled": false,
-    "url": "https://dev.bat.entis.app/api/scale",
+    "url": "https://example.com/webhook",
     "method": "POST",
     "throttle_ms": 1000,
     "include_raw": false,
-    "custom_headers": "gs-key: your-api-key-here",
-    "body_format": "form",
-    "form_template": "scales-code={{scales_code}}&scales-weight={{weight}}&company-id={{company_id}}&entis={{entis}}",
-    "scales_code": "S100",
-    "company_id": "2",
-    "entis": false,
+    "custom_headers": "X-API-Key: your-api-key-here",
+    "body_format": "json",
+    "form_template": "device-id={{port}}&reading={{weight}}&timestamp={{timestamp}}",
+    "scales_code": "",
+    "company_id": "",
     "mode_webhook": "DEV",
     "send_filter": { "enabled": true, "field": "stable", "value": "ST" }
   }

@@ -1,6 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { invoke } from '@tauri-apps/api/core';
-import type { DataLine, DiscoveredDevice, BaudProbeResult } from './types.js';
+import { demoReplyToWrite, isDemoPort } from './demo.js';
+import {
+  toHex,
+  toVisibleAscii,
+  type DataLine,
+  type DiscoveredDevice,
+  type BaudProbeResult,
+} from './types.js';
 
 // ── Tool definitions exposed to the analysis agent ───────────────────────────
 
@@ -99,6 +106,160 @@ export const AGENT_TOOLS: Anthropic.Messages.Tool[] = [
     },
   },
 ];
+
+/** Reconstruct bytes from buffer lines. TX master polls are omitted so CRC
+ *  framing is measured on the slave stream only. */
+export function bytesFromSerialLines(
+  lines: DataLine[],
+  options?: { includeTx?: boolean }
+): number[] {
+  const allBytes: number[] = [];
+  for (const line of lines) {
+    if (!options?.includeTx && line.direction === 'tx') continue;
+    const parts = line.hex.split(/\s+/).filter(Boolean);
+    for (const p of parts) {
+      const n = parseInt(p, 16);
+      if (!Number.isNaN(n) && n >= 0 && n <= 0xff) allBytes.push(n);
+    }
+  }
+  return allBytes;
+}
+
+export function printableRatioFromBytes(bytes: number[]): number {
+  if (bytes.length === 0) return 1;
+  let printable = 0;
+  for (const b of bytes) {
+    if ((b >= 0x20 && b <= 0x7e) || b === 0x0a || b === 0x0d || b === 0x09) printable++;
+  }
+  return Math.round((printable / bytes.length) * 1000) / 1000;
+}
+
+/** Host runs this before the model so verified commit does not depend on a tool call. */
+export function shouldRunBinaryPreflight(lines: DataLine[]): boolean {
+  const bytes = bytesFromSerialLines(lines);
+  if (bytes.length < 10) return false;
+  return printableRatioFromBytes(bytes) < 0.7;
+}
+
+export function analyzeBinaryStructure(lines: DataLine[]): Record<string, unknown> {
+  const allBytes = bytesFromSerialLines(lines);
+  if (allBytes.length < 10) {
+    return { error: 'Not enough bytes to analyze (need ≥10)' };
+  }
+  const bytes = allBytes.slice(-2000);
+  const printableRatio = printableRatioFromBytes(bytes);
+
+  const framingCounts = {
+    soh_0x01: 0,
+    stx_0x02: 0,
+    etx_0x03: 0,
+    eot_0x04: 0,
+    ack_0x06: 0,
+    nak_0x15: 0,
+    dle_0x10: 0,
+  };
+  for (const b of bytes) {
+    if (b === 0x01) framingCounts.soh_0x01++;
+    else if (b === 0x02) framingCounts.stx_0x02++;
+    else if (b === 0x03) framingCounts.etx_0x03++;
+    else if (b === 0x04) framingCounts.eot_0x04++;
+    else if (b === 0x06) framingCounts.ack_0x06++;
+    else if (b === 0x15) framingCounts.nak_0x15++;
+    else if (b === 0x10) framingCounts.dle_0x10++;
+  }
+
+  type FrameGuess = { length: number; count: number; score: number };
+  let bestGuess: FrameGuess | null = null;
+  const maxLen = Math.min(128, Math.floor(bytes.length / 3));
+  for (let len = 4; len <= maxLen; len++) {
+    const framesPossible = Math.floor(bytes.length / len);
+    if (framesPossible < 3) continue;
+    const p0 = bytes[0];
+    const p1 = bytes[1];
+    let matches = 1;
+    for (let f = 1; f < framesPossible; f++) {
+      if (bytes[f * len] === p0 && bytes[f * len + 1] === p1) matches++;
+    }
+    const score = matches / framesPossible;
+    if (score >= 0.7 && (!bestGuess || score > bestGuess.score)) {
+      bestGuess = { length: len, count: framesPossible, score };
+    }
+  }
+
+  const frameAnalysis = bestGuess
+    ? {
+        likely_frame_length: bestGuess.length,
+        frames_detected: bestGuess.count,
+        confidence:
+          bestGuess.score >= 0.95 ? 'high' : bestGuess.score >= 0.85 ? 'medium' : 'low',
+        score: Math.round(bestGuess.score * 100) / 100,
+      }
+    : null;
+
+  function modbusCrc16(data: number[], start: number, end: number): number {
+    let crc = 0xffff;
+    for (let i = start; i < end; i++) {
+      crc ^= data[i];
+      for (let j = 0; j < 8; j++) {
+        if (crc & 1) crc = (crc >> 1) ^ 0xa001;
+        else crc >>= 1;
+      }
+    }
+    return crc & 0xffff;
+  }
+  let crcResult: Record<string, unknown> | null = null;
+  if (bestGuess && bestGuess.length >= 4) {
+    const frames = bestGuess.count;
+    const len = bestGuess.length;
+    let valid = 0;
+    for (let f = 0; f < frames; f++) {
+      const start = f * len;
+      const end = start + len;
+      const crcLo = bytes[end - 2];
+      const crcHi = bytes[end - 1];
+      const expected = (crcHi << 8) | crcLo;
+      const computed = modbusCrc16(bytes, start, end - 2);
+      if (computed === expected) valid++;
+    }
+    crcResult = {
+      algorithm: 'modbus_crc16 (poly 0xA001, init 0xFFFF, LSB-first append)',
+      frames_valid: valid,
+      frames_tested: frames,
+      validity_ratio: frames > 0 ? Math.round((valid / frames) * 1000) / 1000 : 0,
+      interpretation:
+        frames > 0 && valid / frames >= 0.9
+          ? 'STRONG MATCH — this is almost certainly a Modbus RTU stream'
+          : valid / frames >= 0.5
+            ? 'partial match — could be Modbus with occasional corruption or different CRC algorithm'
+            : 'no match — not Modbus RTU (try other checksum algorithms if binary)',
+    };
+  }
+
+  const sampleFramesHex: string[] = [];
+  if (bestGuess) {
+    const samples = Math.min(3, bestGuess.count);
+    for (let i = 0; i < samples; i++) {
+      const start = i * bestGuess.length;
+      const end = start + bestGuess.length;
+      sampleFramesHex.push(
+        bytes
+          .slice(start, end)
+          .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
+          .join(' ')
+      );
+    }
+  }
+
+  return {
+    total_bytes_analyzed: bytes.length,
+    printable_ratio: printableRatio,
+    is_likely_binary: printableRatio < 0.7,
+    framing_bytes_detected: framingCounts,
+    frame_analysis: frameAnalysis,
+    modbus_crc_check: crcResult,
+    sample_frames_hex: sampleFramesHex,
+  };
+}
 
 // ── Tool execution context ─────────────────────────────────────────────────
 
@@ -278,7 +439,30 @@ export async function executeTool(
             return JSON.stringify(gate);
           }
           const before = ctx.lines.length;
-          await new Promise((r) => setTimeout(r, 600));
+          if (isDemoPort(ctx.port)) {
+            ctx.lines.push({
+              id: ctx.lines.length + 1,
+              timestamp: Date.now(),
+              hex: toHex(data),
+              ascii: toVisibleAscii(data),
+              bytes: data.length,
+              direction: 'tx',
+            });
+            const reply = demoReplyToWrite(ctx.port, data);
+            if (reply) {
+              const rx = Array.from(reply);
+              ctx.lines.push({
+                id: ctx.lines.length + 1,
+                timestamp: Date.now(),
+                hex: toHex(rx),
+                ascii: toVisibleAscii(rx),
+                bytes: rx.length,
+                direction: 'rx',
+              });
+            }
+          } else {
+            await new Promise((r) => setTimeout(r, 600));
+          }
           const newLines = ctx.lines.slice(before);
           return JSON.stringify({
             ok: true,
@@ -292,146 +476,7 @@ export async function executeTool(
       }
 
       case 'analyze_binary_structure': {
-        // Reconstruct raw byte stream by parsing each line's hex representation.
-        // We intentionally concatenate across lines — binary frames don't always
-        // align to the renderer's line boundaries.
-        const allBytes: number[] = [];
-        for (const line of ctx.lines) {
-          const parts = line.hex.split(/\s+/).filter(Boolean);
-          for (const p of parts) {
-            const n = parseInt(p, 16);
-            if (!Number.isNaN(n) && n >= 0 && n <= 0xff) allBytes.push(n);
-          }
-        }
-        if (allBytes.length < 10) {
-          return JSON.stringify({ error: 'Not enough bytes to analyze (need ≥10)' });
-        }
-        // Cap at 2000 bytes for responsive tool execution
-        const bytes = allBytes.slice(-2000);
-
-        // Printable ratio (CR, LF, TAB count as printable for text protocols)
-        let printable = 0;
-        for (const b of bytes) {
-          if ((b >= 0x20 && b <= 0x7e) || b === 0x0a || b === 0x0d || b === 0x09) printable++;
-        }
-        const printableRatio = Math.round((printable / bytes.length) * 1000) / 1000;
-
-        // Framing byte counts (common industrial delimiters)
-        const framingCounts = {
-          soh_0x01: 0,
-          stx_0x02: 0,
-          etx_0x03: 0,
-          eot_0x04: 0,
-          ack_0x06: 0,
-          nak_0x15: 0,
-          dle_0x10: 0,
-        };
-        for (const b of bytes) {
-          if (b === 0x01) framingCounts.soh_0x01++;
-          else if (b === 0x02) framingCounts.stx_0x02++;
-          else if (b === 0x03) framingCounts.etx_0x03++;
-          else if (b === 0x04) framingCounts.eot_0x04++;
-          else if (b === 0x06) framingCounts.ack_0x06++;
-          else if (b === 0x15) framingCounts.nak_0x15++;
-          else if (b === 0x10) framingCounts.dle_0x10++;
-        }
-
-        // Detect frame length via repeating 2-byte prefix autocorrelation.
-        // Many binary protocols have a constant header (slave_addr + function,
-        // or STX + length) that repeats at the start of every frame.
-        type FrameGuess = { length: number; count: number; score: number };
-        let bestGuess: FrameGuess | null = null;
-        const maxLen = Math.min(128, Math.floor(bytes.length / 3));
-        for (let len = 4; len <= maxLen; len++) {
-          const framesPossible = Math.floor(bytes.length / len);
-          if (framesPossible < 3) continue;
-          const p0 = bytes[0];
-          const p1 = bytes[1];
-          let matches = 1; // count the first occurrence
-          for (let f = 1; f < framesPossible; f++) {
-            if (bytes[f * len] === p0 && bytes[f * len + 1] === p1) matches++;
-          }
-          const score = matches / framesPossible;
-          if (score >= 0.7 && (!bestGuess || score > bestGuess.score)) {
-            bestGuess = { length: len, count: framesPossible, score };
-          }
-        }
-
-        const frameAnalysis = bestGuess
-          ? {
-              likely_frame_length: bestGuess.length,
-              frames_detected: bestGuess.count,
-              confidence:
-                bestGuess.score >= 0.95 ? 'high' : bestGuess.score >= 0.85 ? 'medium' : 'low',
-              score: Math.round(bestGuess.score * 100) / 100,
-            }
-          : null;
-
-        // Modbus CRC16 (polynomial 0xA001, init 0xFFFF) — try last 2 bytes of each frame
-        function modbusCrc16(data: number[], start: number, end: number): number {
-          let crc = 0xffff;
-          for (let i = start; i < end; i++) {
-            crc ^= data[i];
-            for (let j = 0; j < 8; j++) {
-              if (crc & 1) crc = (crc >> 1) ^ 0xa001;
-              else crc >>= 1;
-            }
-          }
-          return crc & 0xffff;
-        }
-        let crcResult: Record<string, unknown> | null = null;
-        if (bestGuess && bestGuess.length >= 4) {
-          const frames = bestGuess.count;
-          const len = bestGuess.length;
-          let valid = 0;
-          for (let f = 0; f < frames; f++) {
-            const start = f * len;
-            const end = start + len;
-            const crcLo = bytes[end - 2];
-            const crcHi = bytes[end - 1];
-            const expected = (crcHi << 8) | crcLo;
-            const computed = modbusCrc16(bytes, start, end - 2);
-            if (computed === expected) valid++;
-          }
-          crcResult = {
-            algorithm: 'modbus_crc16 (poly 0xA001, init 0xFFFF, LSB-first append)',
-            frames_valid: valid,
-            frames_tested: frames,
-            validity_ratio: frames > 0 ? Math.round((valid / frames) * 100) / 100 : 0,
-            interpretation:
-              frames > 0 && valid / frames >= 0.9
-                ? 'STRONG MATCH — this is almost certainly a Modbus RTU stream'
-                : valid / frames >= 0.5
-                  ? 'partial match — could be Modbus with occasional corruption or different CRC algorithm'
-                  : 'no match — not Modbus RTU (try other checksum algorithms if binary)',
-          };
-        }
-
-        // Sample up to 3 frames as hex + byte-level structure hint
-        const sampleFramesHex: string[] = [];
-        if (bestGuess) {
-          const samples = Math.min(3, bestGuess.count);
-          for (let i = 0; i < samples; i++) {
-            const start = i * bestGuess.length;
-            const end = start + bestGuess.length;
-            sampleFramesHex.push(
-              bytes
-                .slice(start, end)
-                .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
-                .join(' ')
-            );
-          }
-        }
-
-        return JSON.stringify({
-          total_bytes_analyzed: bytes.length,
-          printable_ratio: printableRatio,
-          is_likely_binary: printableRatio < 0.7,
-          framing_bytes_detected: framingCounts,
-          frame_analysis: frameAnalysis,
-          modbus_crc_check: crcResult,
-          sample_frames_hex: sampleFramesHex,
-        });
+        return JSON.stringify(analyzeBinaryStructure(ctx.lines));
       }
 
       default:

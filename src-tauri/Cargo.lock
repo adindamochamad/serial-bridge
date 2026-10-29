@@ -2400,23 +2400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnibridge"
-version = "0.2.2"
-dependencies = [
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serialport",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tauri-plugin-serialplugin",
- "tauri-plugin-store",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3557,6 +3540,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "serialbridge"
+version = "0.2.2"
+dependencies = [
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serialport",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tauri-plugin-store",
+]
+
+[[package]]
 name = "serialize-to-javascript"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4070,20 +4069,6 @@ dependencies = [
  "url",
  "windows",
  "zbus",
-]
-
-[[package]]
-name = "tauri-plugin-serialplugin"
-version = "2.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f12b210ee10e56cfa3f724ee1bff7eeae21f3616ace6de27d54727493c96e92"
-dependencies = [
- "serde",
- "serde_json",
- "serialport",
- "tauri",
- "tauri-plugin",
- "thiserror 2.0.18",
 ]
 
 [[package]]

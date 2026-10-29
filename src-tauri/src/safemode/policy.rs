@@ -473,7 +473,8 @@ mod tests {
 
     #[test]
     fn corrupt_file_fail_closed_on_load() {
-        let dir = std::env::temp_dir().join(format!("omnibridge-safemode-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("serialbridge-safemode-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("safemode-policy.json");
         fs::write(&path, "{ not json").unwrap();
@@ -483,8 +484,10 @@ mod tests {
 
     #[test]
     fn load_or_create_writes_default_when_missing() {
-        let dir =
-            std::env::temp_dir().join(format!("omnibridge-safemode-create-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "serialbridge-safemode-create-{}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("safemode-policy.json");
         let _ = fs::remove_file(&path);

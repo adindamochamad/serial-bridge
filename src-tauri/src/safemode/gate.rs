@@ -82,6 +82,14 @@ impl SafeModeState {
         })
     }
 
+    pub fn validate_human_send_payload(&self, data: &[u8]) -> Result<(), String> {
+        let inner = self.inner.lock().map_err(|e| e.to_string())?;
+        match inner.engine.evaluate_human_send_bytes(data) {
+            Decision::Deny { rule } => Err(format!("Safe Mode blocked this write ({})", rule)),
+            Decision::Allow | Decision::NeedsApproval => Ok(()),
+        }
+    }
+
     pub fn record_human_write(&self, port: &str, data: &[u8]) -> Result<(), String> {
         let mut inner = self.inner.lock().map_err(|e| e.to_string())?;
         let hex = payload_to_spaced_hex(data);
@@ -849,7 +857,7 @@ mod tests {
     use super::*;
     use crate::safemode::policy::parse_policy_json;
     use std::collections::HashMap;
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::{channel, sync_channel};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -878,10 +886,75 @@ mod tests {
     }
 
     #[test]
+    fn human_send_allows_needs_approval_payload() {
+        let engine = engine_send_bytes_needs_approval();
+        assert_eq!(
+            engine.evaluate_human_send_bytes(&[0x1B, 0x54]),
+            Decision::NeedsApproval
+        );
+    }
+
+    #[test]
+    fn human_send_denies_oversize_payload() {
+        let engine = PolicyEngine::from_policy(
+            parse_policy_json(
+                r#"{
+  "version": 1,
+  "default": "deny",
+  "tools": {
+    "send_bytes": {
+      "class": "write",
+      "require_approval": true,
+      "max_payload_bytes": 2,
+      "deny_patterns": [],
+      "allow_patterns": []
+    }
+  },
+  "approval_timeout_secs": 60,
+  "block_session_after_deny": true
+}"#,
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            engine.evaluate_human_send_bytes(&[1, 2, 3]),
+            Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
     fn needs_approval_plan_without_write() {
         let mut engine = engine_send_bytes_needs_approval();
         let plan = plan_agent_send_bytes(&mut engine, "/dev/ttyUSB0", &[0x1B, 0x54], 0);
         assert_eq!(plan, AgentSendPlan::NeedsApproval { is_demo: false });
+    }
+
+    #[test]
+    fn demo_port_send_bytes_needs_approval_with_demo_flag() {
+        let mut engine = engine_send_bytes_needs_approval();
+        let relay_on = b"RELAY_ON\r\n";
+        let plan = plan_agent_send_bytes(&mut engine, "demo://prompt-injection", relay_on, 0);
+        assert_eq!(plan, AgentSendPlan::NeedsApproval { is_demo: true });
+    }
+
+    #[test]
+    fn demo_port_approved_finish_is_simulated_without_write() {
+        let (registry, write_rx) = registry_with_write_channel();
+        let mut engine = engine_send_bytes_needs_approval();
+        let relay_on = b"RELAY_ON\r\n";
+        let resp = finish_after_approval(
+            ApprovalOutcome::Approved,
+            &mut engine,
+            &registry,
+            "demo://prompt-injection",
+            relay_on,
+            true,
+        );
+        assert!(!resp.ok);
+        assert_eq!(resp.simulated, Some(true));
+        assert_eq!(resp.blocked, Some(false));
+        assert_eq!(resp.bytes_sent, Some(relay_on.len() as u32));
+        assert!(write_rx.try_recv().is_err());
     }
 
     #[test]
@@ -913,7 +986,7 @@ mod tests {
     #[test]
     fn approved_finish_writes_once_to_channel() {
         let registry: MonitorRegistry = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let (write_tx, write_rx) = channel::<Vec<u8>>();
+        let (write_tx, write_rx) = sync_channel(32);
         registry.lock().unwrap().insert(
             "ttyTEST".into(),
             crate::PortRegistration {
@@ -953,7 +1026,7 @@ mod tests {
 
     fn registry_with_write_channel() -> (MonitorRegistry, std::sync::mpsc::Receiver<Vec<u8>>) {
         let registry: MonitorRegistry = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let (write_tx, write_rx) = channel::<Vec<u8>>();
+        let (write_tx, write_rx) = sync_channel(32);
         registry.lock().unwrap().insert(
             "ttyTEST".into(),
             crate::PortRegistration {
@@ -1047,7 +1120,7 @@ mod tests {
     #[test]
     fn disable_requires_matican_confirm() {
         let dir =
-            std::env::temp_dir().join(format!("omnibridge-gate-enabled-{}", std::process::id()));
+            std::env::temp_dir().join(format!("serialbridge-gate-enabled-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let audit_path = dir.join("audit.jsonl");
         let enabled_path = dir.join("enabled.json");
@@ -1076,8 +1149,10 @@ mod tests {
 
     #[test]
     fn missing_enabled_file_defaults_on() {
-        let path =
-            std::env::temp_dir().join(format!("omnibridge-enabled-missing-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "serialbridge-enabled-missing-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         assert!(load_enabled_flag(&path).unwrap());
     }
@@ -1109,8 +1184,10 @@ mod tests {
     fn request_approve_write_audit_sequence() {
         use crate::safemode::audit::{read_events, verify_file};
 
-        let dir =
-            std::env::temp_dir().join(format!("omnibridge-gate-audit-seq-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "serialbridge-gate-audit-seq-{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let audit_path = dir.join("audit.jsonl");
         let enabled_path = dir.join("enabled.json");
@@ -1206,8 +1283,10 @@ mod tests {
 
     #[test]
     fn emit_failure_cancels_pending_without_write() {
-        let dir =
-            std::env::temp_dir().join(format!("omnibridge-gate-audit-emit-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "serialbridge-gate-audit-emit-{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let state = SafeModeState::with_engine_and_audit(
             engine_short_approval(),

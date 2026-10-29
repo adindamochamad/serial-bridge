@@ -1,11 +1,13 @@
 mod discovery;
+mod meta_api;
 pub mod safemode;
+mod webhook_http;
 
 use serde::{Deserialize, Serialize};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -28,9 +30,11 @@ struct BaudProbeResult {
     error: Option<String>,
 }
 
+const WRITE_QUEUE_CAPACITY: usize = 32;
+
 pub(crate) struct PortRegistration {
     active: bool,
-    write_tx: Sender<Vec<u8>>,
+    write_tx: SyncSender<Vec<u8>>,
 }
 
 pub(crate) type MonitorRegistry = Arc<Mutex<HashMap<String, PortRegistration>>>;
@@ -50,19 +54,22 @@ pub(crate) fn write_to_port(
     if !state.active {
         return Err(format!("{} monitor is not active", port));
     }
-    state
-        .write_tx
-        .send(data)
-        .map_err(|e| format!("Write channel closed: {}", e))?;
+    state.write_tx.try_send(data).map_err(|e| match e {
+        std::sync::mpsc::TrySendError::Full(_) => {
+            "Write queue full — wait for the port to drain".into()
+        }
+        std::sync::mpsc::TrySendError::Disconnected(_) => {
+            format!("Write channel closed: {}", e)
+        }
+    })?;
     Ok(())
 }
 
 fn is_active(registry: &MonitorRegistry, port: &str) -> bool {
     registry
         .lock()
-        .unwrap()
-        .get(port)
-        .map(|r| r.active)
+        .ok()
+        .and_then(|map| map.get(port).map(|r| r.active))
         .unwrap_or(false)
 }
 
@@ -117,7 +124,7 @@ async fn start_port_monitor(
     let registry = registry.inner().clone();
 
     // Create write channel synchronously so send_bytes_to_port calls race-free
-    let (write_tx, write_rx) = channel::<Vec<u8>>();
+    let (write_tx, write_rx) = sync_channel::<Vec<u8>>(WRITE_QUEUE_CAPACITY);
 
     {
         let mut map = registry.lock().map_err(|e| e.to_string())?;
@@ -144,7 +151,9 @@ async fn start_port_monitor(
                     "port:error",
                     serde_json::json!({ "port": &port_name, "error": e.to_string() }),
                 );
-                reg.lock().unwrap().remove(&port_name);
+                if let Ok(mut map) = reg.lock() {
+                    map.remove(&port_name);
+                }
                 return;
             }
         };
@@ -211,11 +220,22 @@ async fn start_port_monitor(
                     );
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-                Err(_) => break,
+                Err(e) => {
+                    let _ = app.emit(
+                        "port:error",
+                        serde_json::json!({
+                            "port": &port_name,
+                            "error": format!("Read failed: {}", e),
+                        }),
+                    );
+                    break;
+                }
             }
         }
 
-        reg.lock().unwrap().remove(&port_name);
+        if let Ok(mut map) = reg.lock() {
+            map.remove(&port_name);
+        }
         let _ = app.emit("port:closed", &port_name);
     });
 
@@ -229,6 +249,7 @@ fn send_bytes_to_port(
     port: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
+    safe_mode.validate_human_send_payload(&data)?;
     write_to_port(registry.inner(), &port, data.clone())?;
     safe_mode.record_human_write(&port, &data)?;
     Ok(())
@@ -242,7 +263,7 @@ fn is_printable_byte(b: u8) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::sync_channel;
 
     #[test]
     fn is_printable_byte_treats_ascii_space_as_printable() {
@@ -253,7 +274,7 @@ mod tests {
     #[test]
     fn write_to_port_delivers_bytes_to_channel() {
         let registry: MonitorRegistry = Arc::new(Mutex::new(HashMap::new()));
-        let (write_tx, write_rx) = channel::<Vec<u8>>();
+        let (write_tx, write_rx) = sync_channel(WRITE_QUEUE_CAPACITY);
         registry.lock().unwrap().insert(
             "ttyTEST".into(),
             PortRegistration {
@@ -276,7 +297,7 @@ mod tests {
             write_to_port(&registry, "ttyX", vec![1]).unwrap_err(),
             "ttyX is not being monitored"
         );
-        let (write_tx, _) = channel::<Vec<u8>>();
+        let (write_tx, _) = sync_channel(WRITE_QUEUE_CAPACITY);
         registry.lock().unwrap().insert(
             "ttyY".into(),
             PortRegistration {
@@ -409,12 +430,14 @@ async fn send_webhook_request(
     headers: HashMap<String, String>,
     body: String,
 ) -> Result<WebhookResponse, String> {
-    let http_method = reqwest::Method::from_bytes(method.as_bytes())
-        .map_err(|e| format!("Invalid method '{}': {}", method, e))?;
+    let http_method = webhook_http::validate_webhook_method(&method)?;
+    let parsed_url = webhook_http::validate_webhook_url(&url)?;
+    webhook_http::validate_webhook_body(&body)?;
+    let filtered = webhook_http::filter_webhook_request_headers(headers);
+    let client = webhook_http::build_webhook_http_client()?;
 
-    let client = reqwest::Client::new();
-    let mut request = client.request(http_method, &url);
-    for (key, value) in headers {
+    let mut request = client.request(http_method, parsed_url);
+    for (key, value) in filtered {
         request = request.header(key, value);
     }
     request = request.body(body);
@@ -456,10 +479,10 @@ pub fn run() {
                 .join("safemode-enabled.json");
             let safe_state = safemode::gate::init_state(&policy_path, audit_path, enabled_path)?;
             app.manage(safe_state);
+            meta_api::init_meta_api(app.handle())?;
             Ok(())
         })
         .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_serialplugin::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             discover_devices,
@@ -475,6 +498,12 @@ pub fn run() {
             safemode::gate::safemode_read_audit,
             safemode::gate::safemode_get_enabled,
             safemode::gate::safemode_set_enabled,
+            meta_api::meta_set_api_key,
+            meta_api::meta_clear_api_key,
+            meta_api::meta_key_status,
+            meta_api::meta_messages_create,
+            meta_api::meta_count_tokens,
+            meta_api::meta_list_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -16,28 +16,27 @@
   import SettingsModal from "$lib/SettingsModal.svelte";
   import ApprovalDialog from "$lib/ApprovalDialog.svelte";
   import { getAllProfiles, saveProfile, type DeviceProfile } from "$lib/profiles.js";
-  import { getApiKey } from "$lib/settings.js";
+  import { hasApiKey } from "$lib/settings.js";
   import type { ProtocolAnalysis } from "$lib/ai-analysis.js";
   import {
     allDemoDevices,
     demoScenarioFromPort,
     isDemoPort,
   } from "$lib/demo.js";
-  import { terapkanSemuaPresetBundled } from "$lib/bundled-presets.js";
-  import versiPkg from "../../package.json";
+  import { applyAllBundledPresets } from "$lib/bundled-presets.js";
+  import pkgVersion from "../../package.json";
   import {
-    BAUD_OPERASI_CAS,
-    BAUD_WARMUP_CAS,
-    DURASI_WARMUP_CAS_MS,
-    perluWarmupCas,
-    tandaiWarmupSelesai,
-    tidur,
+    CAS_OPERATING_BAUD,
+    CAS_WARMUP_BAUD,
+    CAS_WARMUP_DURATION_MS,
+    needsCasWarmup,
+    markCasWarmupDone,
+    sleep,
   } from "$lib/cas-scale.js";
   import {
     getConfig as getWebhookConfig,
     saveConfig as saveWebhookConfig,
     defaultConfig,
-    templateFormTimbangan,
     type WebhookConfig,
   } from "$lib/webhook.js";
 
@@ -50,8 +49,8 @@
   /** fingerprint → learned profile */
   let profiles = $state<Record<string, DeviceProfile>>({});
 
-  /** fingerprint → konfigurasi webhook (kode timbangan, company-id, dll.) */
-  let konfigurasiWebhook = $state<Record<string, WebhookConfig>>({});
+  /** fingerprint → webhook configuration */
+  let webhookConfigs = $state<Record<string, WebhookConfig>>({});
 
   function profileFor(d: DiscoveredDevice): DeviceProfile | null {
     return profiles[deviceFingerprint(d)] ?? null;
@@ -60,7 +59,7 @@
   /** port → active boolean */
   let monitoring = $state<Record<string, boolean>>({});
   /** port → sedang proses start/warmup (cegah double-click) */
-  let sedangMemulai = $state<Record<string, boolean>>({});
+  let startingPorts = $state<Record<string, boolean>>({});
   /** port → selected baud rate */
   let baudRates = $state<Record<string, number>>({});
   /** port → data lines */
@@ -77,8 +76,7 @@
   let needsApiKey = $state(false);
 
   async function refreshApiKeyStatus() {
-    const key = await getApiKey();
-    needsApiKey = !key;
+    needsApiKey = !(await hasApiKey());
   }
   /** port → interval id for demo generators */
   let demoIntervals: Record<string, ReturnType<typeof setInterval>> = {};
@@ -100,40 +98,26 @@
 
   // ── Commands ───────────────────────────────────────────────────────────────
 
-  async function muatKonfigurasiWebhook(devs: DiscoveredDevice[]) {
-    const baru = { ...konfigurasiWebhook };
+  async function loadWebhookConfigs(devs: DiscoveredDevice[]) {
+    const next = { ...webhookConfigs };
     await Promise.all(
       devs.map(async (d) => {
         const fp = deviceFingerprint(d);
         const cfg = await getWebhookConfig(fp);
-        baru[fp] = cfg ?? defaultConfig();
+        next[fp] = cfg ?? defaultConfig();
       })
     );
-    konfigurasiWebhook = baru;
+    webhookConfigs = next;
   }
 
-  async function ubahKonfigurasiWebhookPort(
+  async function saveWebhookConfigForPort(
     fp: string,
     patch: Partial<WebhookConfig> | WebhookConfig
   ) {
-    const lama = konfigurasiWebhook[fp] ?? defaultConfig();
-    const baru: WebhookConfig = { ...lama, ...patch };
-
-    // ENTIS = saklar auto-forward: centang → kirim terus, uncheck → stop
-    if ("entis" in patch) {
-      baru.enabled = Boolean(patch.entis);
-      baru.form_template = templateFormTimbangan();
-      baru.body_format = "form";
-    } else if ("enabled" in patch) {
-      baru.entis = Boolean(patch.enabled);
-    }
-
-    if ("scales_code" in patch || "company_id" in patch || "mode_webhook" in patch) {
-      baru.form_template = templateFormTimbangan();
-      baru.body_format = "form";
-    }
-    konfigurasiWebhook = { ...konfigurasiWebhook, [fp]: baru };
-    await saveWebhookConfig(fp, baru);
+    const previous = webhookConfigs[fp] ?? defaultConfig();
+    const next: WebhookConfig = { ...previous, ...patch };
+    webhookConfigs = { ...webhookConfigs, [fp]: next };
+    await saveWebhookConfig(fp, next);
   }
 
   async function discoverDevices() {
@@ -147,14 +131,14 @@
       devices = discovered;
       profiles = loadedProfiles;
 
-      // Terapkan preset bawaan dari repo (mis. CAS Scale) untuk device baru
-      const hasilPreset = await terapkanSemuaPresetBundled(discovered);
-      if (hasilPreset.profilBaru > 0) {
+      // Apply bundled presets (e.g. CAS scale) for newly discovered devices.
+      const presetResult = await applyAllBundledPresets(discovered);
+      if (presetResult.profilesCreated > 0) {
         profiles = await getAllProfiles();
-        toast('info', `Preset bawaan dimuat: ${hasilPreset.profilBaru} device`);
+        toast('info', `Loaded bundled preset for ${presetResult.profilesCreated} device(s)`);
       }
 
-      await muatKonfigurasiWebhook(devices);
+      await loadWebhookConfigs(devices);
 
       for (const d of devices) {
         if (baudRates[d.port] === undefined) {
@@ -196,9 +180,9 @@
         if (baudRates[d.port] === undefined) baudRates[d.port] = d.suggested_baud;
       }
       try {
-        await terapkanSemuaPresetBundled(demos);
+        await applyAllBundledPresets(demos);
         profiles = await getAllProfiles();
-        await muatKonfigurasiWebhook(demos);
+        await loadWebhookConfigs(demos);
       } catch {
         // Demo streams work without persisted presets (e.g. browser preview).
       }
@@ -213,17 +197,19 @@
     activeTab = port;
 
     demoIntervals[port] = setInterval(() => {
-      const bytes = scenario.generate();
-      const data = Array.from(bytes);
-      const line: DataLine = {
-        id: ++lineSeq,
-        timestamp: Date.now(),
-        hex: toHex(data),
-        ascii: toVisibleAscii(data),
-        bytes: data.length,
-      };
-      buffers[port].push(line);
-      if (buffers[port].length > 1000) buffers[port].splice(0, 1);
+      for (const chunk of scenario.generate()) {
+        const data = Array.from(chunk.bytes);
+        const line: DataLine = {
+          id: ++lineSeq,
+          timestamp: Date.now(),
+          hex: toHex(data),
+          ascii: toVisibleAscii(data),
+          bytes: data.length,
+          direction: chunk.direction,
+        };
+        buffers[port].push(line);
+        if (buffers[port].length > 1000) buffers[port].splice(0, 1);
+      }
     }, scenario.interval_ms);
   }
 
@@ -234,25 +220,24 @@
     }
 
     // Cegah double-click / start bersamaan saat warmup masih berjalan
-    if (sedangMemulai[port] || monitoring[port]) return;
-    sedangMemulai[port] = true;
+    if (startingPorts[port] || monitoring[port]) return;
+    startingPorts[port] = true;
 
     const device = devices.find((d) => d.port === port);
-    const profil = device ? profileFor(device) : null;
-    const butuhWarmup = !!(device && perluWarmupCas(port, device, profil));
+    const profile = device ? profileFor(device) : null;
+    const needsWarmup = !!(device && needsCasWarmup(port, device, profile));
 
     try {
-      // Inisialisasi baud CAS: 19200 → stop → 9600 (wajib agar kg terbaca)
-      if (butuhWarmup) {
+      if (needsWarmup) {
         try {
-          toast('info', `${port}: inisialisasi CAS 19200→9600…`, 3000);
-          await invoke("start_port_monitor", { port, baudRate: BAUD_WARMUP_CAS });
-          await tidur(DURASI_WARMUP_CAS_MS);
+          toast('info', `${port}: CAS warmup 19200→9600…`, 3000);
+          await invoke("start_port_monitor", { port, baudRate: CAS_WARMUP_BAUD });
+          await sleep(CAS_WARMUP_DURATION_MS);
           await invoke("stop_port_monitor", { port }).catch(() => {});
-          await tidur(150); // beri waktu port dilepas (Windows)
-          baudRates[port] = BAUD_OPERASI_CAS;
+          await sleep(150);
+          baudRates[port] = CAS_OPERATING_BAUD;
         } catch (e) {
-          toast('warn', `Warmup CAS gagal: ${String(e).slice(0, 80)}`, 5000);
+          toast('warn', `CAS warmup failed: ${String(e).slice(0, 80)}`, 5000);
           return;
         }
       }
@@ -263,7 +248,7 @@
       buffers[port] = [];
       activeTab = port;
 
-      if (butuhWarmup) tandaiWarmupSelesai(port);
+      if (needsWarmup) markCasWarmupDone(port);
 
       const unData = await listen<PortDataEvent>("port:data", (ev) => {
         if (ev.payload.port !== port) return;
@@ -301,7 +286,7 @@
       monitoring[port] = false;
       scanError = String(e);
     } finally {
-      sedangMemulai[port] = false;
+      startingPorts[port] = false;
     }
   }
 
@@ -367,7 +352,7 @@
         <div class="logo-icon">⬡</div>
         <div class="logo-text">
           <div class="app-name">SerialBridge</div>
-          <div class="app-sub">Commit gate · {versiPkg.version} · muse-spark-1.3</div>
+          <div class="app-sub">Commit gate · {pkgVersion.version} · muse-spark-1.3</div>
         </div>
         <button class="header-icon-btn" onclick={() => (showSettings = true)} title="Settings">
           ⚙
@@ -424,13 +409,11 @@
           <PortCard
             {device}
             monitoring={monitoring[device.port] ?? false}
-            starting={sedangMemulai[device.port] ?? false}
+            starting={startingPorts[device.port] ?? false}
             selectedBaud={baudRates[device.port] ?? device.suggested_baud}
             learnedProfile={profileFor(device)}
-            webhookConfig={konfigurasiWebhook[fp] ?? null}
             onToggle={() => toggleMonitor(device.port)}
             onBaudChange={(baud) => (baudRates[device.port] = baud)}
-            onWebhookConfigChange={(patch) => ubahKonfigurasiWebhookPort(fp, patch)}
           />
         {/each}
       {/if}
@@ -456,13 +439,13 @@
       <div class="empty-state">
         <div class="empty-icon">⬡</div>
         <h2>Welcome to SerialBridge</h2>
-        <p class="tagline">Intelligent Serial Gateway · AI-powered protocol detection</p>
+        <p class="tagline">The model proposes a parser — the commit gate decides whether hardware may trust it.</p>
 
         {#if devices.length === 0}
-          <p class="intro">
-            Bridge legacy RS-232 hardware to modern cloud ecosystems.<br />
-            the analysis model identifies the protocol, but the commit gate withholds the parser<br />
-            until framing evidence matches the hypothesis.
+          <p class="intro judge-path">
+            No cable required. <strong>Try Demo Mode</strong> → <strong>Modbus RTU PLC</strong> →
+            <strong>Investigate</strong>. Contrast <strong>Naive (no gate)</strong> on the same stream.
+            Optional: <strong>Prompt injection trap</strong> — the model proposes; you decide.
           </p>
           {#if needsApiKey}
             <button class="api-key-hint" onclick={() => (showSettings = true)} type="button">
@@ -485,8 +468,8 @@
           <div class="feature-grid">
             <div class="feature">
               <div class="feature-icon">🧠</div>
-              <div class="feature-title">Protocol Detective</div>
-              <div class="feature-desc">the analysis model reads raw bytes, then a code commit gate decides whether a parser may be installed</div>
+              <div class="feature-title">Verified investigate</div>
+              <div class="feature-desc">muse-spark-1.3 tool loop plus a commit gate — regex and presets install only with evidence</div>
             </div>
             <div class="feature">
               <div class="feature-icon">📊</div>
@@ -549,9 +532,9 @@
               deviceFingerprint={fp}
               device={device ?? null}
               learnedProfile={device ? profileFor(device) : null}
-              webhookConfig={fp ? (konfigurasiWebhook[fp] ?? defaultConfig()) : defaultConfig()}
+              webhookConfig={fp ? (webhookConfigs[fp] ?? defaultConfig()) : defaultConfig()}
               onWebhookConfigChange={async (cfg) => {
-                if (fp) await ubahKonfigurasiWebhookPort(fp, cfg);
+                if (fp) await saveWebhookConfigForPort(fp, cfg);
               }}
               onClose={() => closeBuffer(port)}
               onAnalysisComplete={(a) => handleAnalysisComplete(port, a)}

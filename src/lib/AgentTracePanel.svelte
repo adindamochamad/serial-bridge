@@ -209,7 +209,7 @@
       {#if usage && (usage.input_tokens > 0 || usage.output_tokens > 0)}
         <span
           class="cost-chip"
-          title={`Tokens · in: ${usage.input_tokens} · out: ${usage.output_tokens} · cached: ${usage.cache_read_tokens} · cache-write: ${usage.cache_write_tokens}\nEstimated cost at the analysis model Standard rates (dev.meta.ai pricing).`}
+          title={`Tokens · in: ${usage.input_tokens} · out: ${usage.output_tokens} · cached: ${usage.cache_read_tokens} · cache-write: ${usage.cache_write_tokens}\nEstimated cost at muse-spark-1.3 Standard rates (dev.meta.ai pricing).`}
         >
           💰 {formatCost(usage.estimated_cost_usd)}
           {#if usage.cache_hit_ratio > 0.1}
