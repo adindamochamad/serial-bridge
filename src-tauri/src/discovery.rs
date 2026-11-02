@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serialport::{SerialPortInfo, SerialPortType};
 use std::collections::HashMap;
-use std::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +91,8 @@ pub fn list_devices() -> Vec<DiscoveredDevice> {
 fn daftar_port_fallback_macos() -> Vec<DiscoveredDevice> {
     #[cfg(target_os = "macos")]
     {
+        use std::fs;
+
         let mut daftar_perangkat: Vec<DiscoveredDevice> = Vec::new();
         let Ok(entri_dev) = fs::read_dir("/dev") else {
             return daftar_perangkat;
@@ -146,11 +147,11 @@ fn kunci_pasangan_port(nama_port: &str) -> String {
     nama_port.to_string()
 }
 
-fn pilih_port_lebih_baik(nama_port_baru: &str, nama_port_lama: &str) -> bool {
+fn pilih_port_lebih_baik(_nama_port_baru: &str, _nama_port_lama: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
-        let port_baru_cu = nama_port_baru.starts_with("/dev/cu.");
-        let port_lama_cu = nama_port_lama.starts_with("/dev/cu.");
+        let port_baru_cu = _nama_port_baru.starts_with("/dev/cu.");
+        let port_lama_cu = _nama_port_lama.starts_with("/dev/cu.");
         if port_baru_cu != port_lama_cu {
             return port_baru_cu;
         }
