@@ -74,16 +74,20 @@ fn is_active(registry: &MonitorRegistry, port: &str) -> bool {
 }
 
 fn kandidat_port_macos(nama_port: &str) -> Vec<String> {
-    let mut daftar_port = vec![nama_port.to_string()];
     #[cfg(target_os = "macos")]
     {
+        let mut daftar_port = vec![nama_port.to_string()];
         if let Some(akhiran_port) = nama_port.strip_prefix("/dev/cu.") {
             daftar_port.push(format!("/dev/tty.{}", akhiran_port));
         } else if let Some(akhiran_port) = nama_port.strip_prefix("/dev/tty.") {
             daftar_port.push(format!("/dev/cu.{}", akhiran_port));
         }
+        daftar_port
     }
-    daftar_port
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![nama_port.to_string()]
+    }
 }
 
 fn buka_port_dengan_konfigurasi(
