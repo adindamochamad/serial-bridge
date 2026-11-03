@@ -35,3 +35,6 @@ sha2 = "0.10"
 # Pin indexmap to version compatible with stable Rust (< 2.14 which requires edition2024)
 indexmap = ">=1.9, <2.14"
 
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
