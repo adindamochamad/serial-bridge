@@ -1,6 +1,6 @@
 {
   "name": "serial-bridge",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Desktop serial gateway with optional AI protocol analysis",
   "type": "module",
   "scripts": {
