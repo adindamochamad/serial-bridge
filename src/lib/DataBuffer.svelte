@@ -7,6 +7,7 @@
   import {
     analyzeStream,
     analyzeWithAgent,
+    refineParserIteratively,
     friendlyError,
     type ProtocolAnalysis,
     type AnalysisField,
@@ -85,6 +86,10 @@
   let agentApiCalls = $state(0);
   let agentStoppedAt = $state<'end_turn' | 'max_steps' | 'error' | null>(null);
   let agentUsage = $state<UsageStats | null>(null);
+
+  // ── Iterative refinement state ───────────────────────────────────────────
+  let refining = $state(false);
+  let refineIterations = $state(0);
 
   // ── Resizable split ──────────────────────────────────────────────────────
   /** Percent of vertical space given to the top buffer; the analysis panel
@@ -406,6 +411,42 @@
     }
     investigating = false;
   }
+
+  async function runRefinement() {
+    if (lines.length === 0 || refining) return;
+    showAnalysis = true;
+    bottomTab = 'investigation';
+    refining = true;
+    agentTrace = [];
+    agentError = null;
+    agentApiCalls = 0;
+    agentStoppedAt = null;
+    agentUsage = null;
+    analysisError = null;
+    refineIterations = 0;
+
+    const devices = device ? [device] : [];
+    const result = await refineParserIteratively(lines, devices, (step) => {
+      agentTrace = [...agentTrace, step];
+    });
+
+    refineIterations = result.iterations;
+    agentApiCalls = result.total_api_calls;
+    agentUsage = result.usage;
+
+    if (result.analysis) {
+      analysisResult = result.analysis;
+      analysisResult.committed = false;
+      analysisResult.gate_mode = 'naive';
+      isRecognized = false;
+      agentError = result.stopped_at === 'max_iterations' 
+        ? `Reached max iterations (${result.iterations}). Parser may be incomplete.`
+        : null;
+    } else {
+      agentError = result.error ?? 'Refinement failed to produce a parser';
+    }
+    refining = false;
+  }
 </script>
 
 <div class="buffer-panel">
@@ -447,7 +488,7 @@
       <button
         class="ctrl-btn investigate primary-action"
         onclick={runInvestigation}
-        disabled={investigating || lines.length === 0}
+        disabled={investigating || refining || lines.length === 0}
         title="🔬 Investigate — muse-spark-1.3 tool loop. Parser and dashboard install only if the verified commit gate sees evidence."
       >
         {#if investigating}
@@ -457,9 +498,21 @@
         {/if}
       </button>
       <button
+        class="ctrl-btn refine secondary-action"
+        onclick={runRefinement}
+        disabled={refining || investigating || lines.length === 0}
+        title="🔄 Refine Parser — Iterative loop with Rust validation & testing. Shows iterations in trace panel."
+      >
+        {#if refining}
+          <span class="spin-sm">◌</span> Refining{refineIterations > 0 ? ` (${refineIterations})` : ''}…
+        {:else}
+          🔄 Refine Parser
+        {/if}
+      </button>
+      <button
         class="ctrl-btn analyze secondary-action"
         onclick={runAnalysis}
-        disabled={analysisLoading || lines.length === 0}
+        disabled={analysisLoading || investigating || refining || lines.length === 0}
         title="Naive one-shot — installs a parser without the evidence gate (contrast lane for judges)."
       >
         {#if analysisLoading}
@@ -862,6 +915,18 @@
     background: #ebe0ff;
     border-color: #8b45e8;
     color: #8b45e8;
+  }
+
+  .ctrl-btn.refine.secondary-action {
+    border-color: #8b5cf6;
+    color: #8b5cf6;
+    background: rgba(139, 92, 246, 0.1);
+  }
+
+  .ctrl-btn.refine.secondary-action:hover:not(:disabled) {
+    background: rgba(139, 92, 246, 0.2);
+    border-color: #7c3aed;
+    color: #7c3aed;
   }
 
   .ctrl-btn.analyze.secondary-action {

@@ -54,3 +54,19 @@ export interface AuditEventRow {
   prev_hash: string;
   hash: string;
 }
+
+/**
+ * Request Muse Spark explanation for a Safe Mode block.
+ * This is explanation-only — cannot bypass the gate.
+ */
+export async function explainSafeModeBlock(
+  blockedHex: string,
+  blockReason: string
+): Promise<string> {
+  const { metaExplainBlock } = await import('./meta-api.js');
+  try {
+    return await metaExplainBlock(blockedHex, blockReason);
+  } catch (err) {
+    return `Could not generate explanation: ${String(err)}`;
+  }
+}

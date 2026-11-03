@@ -508,6 +508,8 @@ pub fn run() {
             meta_api::meta_messages_create,
             meta_api::meta_count_tokens,
             meta_api::meta_list_models,
+            meta_api::meta_explain_block,
+            meta_api::meta_validate_parser_json,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
