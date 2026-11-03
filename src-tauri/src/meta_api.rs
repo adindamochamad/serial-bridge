@@ -323,7 +323,11 @@ pub async fn meta_explain_block(
 
     let payload = serde_json::json!({
         "model": META_MODEL_SPARK,
-        "max_tokens": 200,
+        "max_tokens": 4096,
+        "thinking": {
+            "type": "enabled",
+            "budget_tokens": 1024
+        },
         "messages": [{
             "role": "user",
             "content": prompt
@@ -360,13 +364,20 @@ pub async fn meta_explain_block(
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("Invalid JSON from Meta Model API: {}", e))?;
 
-    // Extract text content from response
+    // Extract text content from response - find first block with type=="text"
+    // (thinking blocks may come first with muse-spark-1.3)
     let content = parsed
         .get("content")
         .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|block| block.get("text"))
-        .and_then(|t| t.as_str())
+        .and_then(|arr| {
+            arr.iter().find_map(|block| {
+                if block.get("type")?.as_str()? == "text" {
+                    block.get("text")?.as_str()
+                } else {
+                    None
+                }
+            })
+        })
         .ok_or("No text content in API response")?;
 
     Ok(content.to_string())
@@ -568,5 +579,81 @@ mod tests {
             "notes": "Modbus test"
         });
         assert!(super::meta_validate_parser_json(valid).is_ok());
+    }
+
+    #[test]
+    fn response_parsing_finds_text_after_thinking() {
+        // Simulate a response with thinking block first, then text
+        let response = serde_json::json!({
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "Let me analyze this..."
+                },
+                {
+                    "type": "text",
+                    "text": "This command was blocked because..."
+                }
+            ]
+        });
+
+        let content_array = response.get("content").unwrap().as_array().unwrap();
+        let text_content = content_array.iter().find_map(|block| {
+            if block.get("type")?.as_str()? == "text" {
+                block.get("text")?.as_str()
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(text_content, Some("This command was blocked because..."));
+    }
+
+    #[test]
+    fn response_parsing_handles_text_only() {
+        // Response without thinking block
+        let response = serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Direct response"
+                }
+            ]
+        });
+
+        let content_array = response.get("content").unwrap().as_array().unwrap();
+        let text_content = content_array.iter().find_map(|block| {
+            if block.get("type")?.as_str()? == "text" {
+                block.get("text")?.as_str()
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(text_content, Some("Direct response"));
+    }
+
+    #[test]
+    fn response_parsing_returns_none_without_text() {
+        // Response with only thinking
+        let response = serde_json::json!({
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "Just thinking..."
+                }
+            ]
+        });
+
+        let content_array = response.get("content").unwrap().as_array().unwrap();
+        let text_content = content_array.iter().find_map(|block| {
+            if block.get("type")?.as_str()? == "text" {
+                block.get("text")?.as_str()
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(text_content, None);
     }
 }

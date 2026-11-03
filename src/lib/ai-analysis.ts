@@ -254,8 +254,8 @@ USER QUESTION: ${ctx.question}`;
   let response: Anthropic.Messages.Message;
   try {
     response = await metaMessagesCreate({
-      max_tokens: 1024,
-      thinking: { type: 'adaptive' },
+      max_tokens: 2048,
+      thinking: { type: 'enabled', budget_tokens: 1024 },
       system: cachedSystemPrompt(SYSTEM_PROMPT_ASK),
       messages,
     });
@@ -272,6 +272,14 @@ USER QUESTION: ${ctx.question}`;
     throw new Error('No text response from the model');
   }
   const fullText = textBlock.text.trim();
+  
+  // Handle potential truncation
+  if (response.stop_reason === 'max_tokens') {
+    const truncatedText = fullText + '\n\n[Response truncated - increase max_tokens if needed]';
+    if (truncatedText) onChunk?.(truncatedText);
+    return truncatedText;
+  }
+  
   if (fullText) onChunk?.(fullText);
   return fullText;
 }
@@ -334,7 +342,7 @@ Identify the protocol and extract all structured data fields.${
 
   const response = await metaMessagesCreate({
     max_tokens: 8192,
-    thinking: { type: 'adaptive' },
+    thinking: { type: 'enabled', budget_tokens: 3000 },
     system: cachedSystemPrompt(SYSTEM_PROMPT),
     messages: [{ role: 'user', content: userContent }],
   });
@@ -660,7 +668,7 @@ Use your tools to investigate as needed. Begin investigation now.${
     try {
       response = await metaMessagesCreate({
         max_tokens: 8192,
-        thinking: { type: 'adaptive' },
+        thinking: { type: 'enabled', budget_tokens: 3000 },
         system: cachedSystemPrompt(SYSTEM_PROMPT_AGENT),
         tools: AGENT_TOOLS,
         messages,
@@ -892,25 +900,38 @@ export async function refineParserIteratively(
   let apiCalls = 0;
   let lastProposal: ProtocolAnalysis | null = null;
   let feedbackMessages: string[] = [];
+  
+  // Prepare sample data context (last 80 lines)
+  const sampleLines = lines.slice(-80);
+  const bufferContext = sampleLines
+    .map((l, i) => {
+      const ts = new Date(l.timestamp).toISOString().slice(11, 23);
+      return `[${i}] ${ts} HEX: ${l.hex.slice(0, 80)}  ASCII: ${l.ascii.slice(0, 40)}`;
+    })
+    .join('\n');
+
+  // Build conversation history across iterations
+  const messages: Anthropic.Messages.MessageParam[] = [];
 
   for (let iteration = 0; iteration < MAX_REFINEMENT_ITERATIONS; iteration++) {
     emit(makeStep('thinking', { text: `Refinement iteration ${iteration + 1}/${MAX_REFINEMENT_ITERATIONS}` }));
 
     // Build prompt with feedback from previous iteration
-    const userPrompt = iteration === 0
-      ? 'Analyze the serial data and generate a parser in strict JSON format.'
-      : `Previous parser attempt failed validation or testing. Feedback:\n${feedbackMessages.join('\n')}\n\nRefine the parser and try again.`;
+    let userPrompt: string;
+    if (iteration === 0) {
+      userPrompt = `Analyze the following serial data and generate a parser in strict JSON format.\n\nSample buffer (${sampleLines.length} lines):\n${bufferContext}\n\nGenerate a ProtocolAnalysis JSON with protocol, confidence, device_hint, fields (with regex patterns), and notes.`;
+    } else {
+      userPrompt = `Previous parser attempt failed. Feedback:\n${feedbackMessages.join('\n')}\n\nSample data reminder:\n${bufferContext.split('\n').slice(0, 10).join('\n')}\n...(${sampleLines.length} lines total)\n\nRefine the parser and try again with corrected regex patterns.`;
+    }
 
-    const messages: Anthropic.Messages.MessageParam[] = [
-      { role: 'user', content: userPrompt }
-    ];
+    messages.push({ role: 'user', content: userPrompt });
 
     let response: Anthropic.Messages.Message;
     try {
       response = await metaMessagesCreate({
         model: META_MODEL_SPARK,
         max_tokens: 4096,
-        thinking: { type: 'adaptive' },
+        thinking: { type: 'enabled', budget_tokens: 2048 },
         system: cachedSystemPrompt(SYSTEM_PROMPT),
         messages,
         tools: AGENT_TOOLS as unknown as Anthropic.Messages.Tool[],
@@ -931,7 +952,8 @@ export async function refineParserIteratively(
       };
     }
 
-    // Process response blocks
+    // Process response blocks and track for conversation history
+    lastProposal = null;
     for (const block of response.content) {
       if (block.type === 'thinking') {
         emit(makeStep('thinking', { text: block.thinking }));
@@ -944,11 +966,38 @@ export async function refineParserIteratively(
             lastProposal = extracted;
           }
         }
+      } else if (block.type === 'tool_use') {
+        emit(makeStep('tool_call', {
+          tool_name: block.name,
+          tool_input: block.input as Record<string, unknown>
+        }));
       }
     }
 
+    // Add assistant response to history for next iteration
+    messages.push({
+      role: 'assistant',
+      content: response.content as unknown as Anthropic.Messages.ContentBlockParam[]
+    });
+
+    // Handle tool calls if any
+    if (response.stop_reason === 'tool_use') {
+      const toolUses = response.content.filter(
+        (b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use'
+      );
+      
+      // Execute tools but continue refinement loop
+      for (const tu of toolUses) {
+        const output = 'Tool calls not yet supported in refinement loop';
+        emit(makeStep('tool_result', { tool_name: tu.name, tool_output: output }));
+      }
+      
+      feedbackMessages = ['Model attempted tool use - please provide JSON directly in text response.'];
+      continue;
+    }
+
     if (!lastProposal) {
-      feedbackMessages = ['No valid JSON parser proposal found in response.'];
+      feedbackMessages = ['No valid JSON parser proposal found in response. Ensure JSON is included in text block.'];
       continue;
     }
 
