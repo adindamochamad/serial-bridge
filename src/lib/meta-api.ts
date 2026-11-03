@@ -63,3 +63,16 @@ export async function metaCountTokens(
 ): Promise<{ input_tokens: number }> {
   return invoke<{ input_tokens: number }>('meta_count_tokens', { body });
 }
+
+/** Ask Muse Spark to explain why Safe Mode blocked a command (explanation-only, cannot bypass). */
+export async function metaExplainBlock(
+  blockedHex: string,
+  blockReason: string
+): Promise<string> {
+  return invoke<string>('meta_explain_block', { blockedHex, blockReason });
+}
+
+/** Validate parser JSON against ProtocolAnalysis schema on the Rust side. */
+export async function metaValidateParserJson(body: unknown): Promise<void> {
+  return invoke<void>('meta_validate_parser_json', { body });
+}

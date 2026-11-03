@@ -6,12 +6,17 @@
     formatCountdownSeconds,
     formatHexAsciiRows,
     remainingApprovalMs,
+    explainSafeModeBlock,
     type ApprovalRequestedPayload,
   } from './safemode.js';
+  import { hasApiKey } from './settings.js';
 
   let queue = $state<ApprovalRequestedPayload[]>([]);
   let countdownMs = $state(0);
   let timer: ReturnType<typeof setInterval> | null = null;
+  let aiExplanation = $state<string | null>(null);
+  let loadingExplanation = $state(false);
+  let keyConfigured = $state(false);
 
   const current = $derived(queue[0] ?? null);
   const rows = $derived(
@@ -58,7 +63,20 @@
     } catch {
       // ignore — Rust ignores unknown/expired ids as well
     }
+    aiExplanation = null;
     queue = queue.slice(1);
+  }
+
+  async function requestAiExplanation() {
+    if (!current || loadingExplanation) return;
+    loadingExplanation = true;
+    try {
+      aiExplanation = await explainSafeModeBlock(current.hex, current.reason);
+    } catch (err) {
+      aiExplanation = `Failed to get explanation: ${String(err)}`;
+    } finally {
+      loadingExplanation = false;
+    }
   }
 
   onMount(() => {
@@ -68,6 +86,12 @@
     }).then((fn) => {
       unlisten = fn;
     });
+    
+    // Check if API key is configured
+    hasApiKey().then(configured => {
+      keyConfigured = configured;
+    });
+
     return () => {
       unlisten?.();
       clearTimer();
@@ -86,6 +110,24 @@
       <div class="body">
         <p class="untrusted-label">Reason <span class="untrusted-tag">untrusted, written by AI</span></p>
         <p class="reason">{current.reason}</p>
+
+        {#if keyConfigured}
+          <button
+            type="button"
+            class="btn-explain"
+            onclick={requestAiExplanation}
+            disabled={loadingExplanation}
+          >
+            {loadingExplanation ? 'Asking Muse Spark...' : '🧠 Explain with AI'}
+          </button>
+        {/if}
+
+        {#if aiExplanation}
+          <div class="ai-explanation">
+            <p class="ai-label">🤖 Muse Spark explanation:</p>
+            <p class="ai-text">{aiExplanation}</p>
+          </div>
+        {/if}
 
         <table class="hex-table">
           <thead>
@@ -181,6 +223,49 @@
     font-size: 0.95rem;
     line-height: 1.4;
     word-break: break-word;
+  }
+
+  .btn-explain {
+    margin: 0.75rem 0;
+    padding: 0.5rem 1rem;
+    background: var(--accent-primary, #8b5cf6);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .btn-explain:hover:not(:disabled) {
+    background: var(--accent-hover, #7c3aed);
+  }
+
+  .btn-explain:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .ai-explanation {
+    margin: 1rem 0;
+    padding: 0.75rem;
+    background: rgba(139, 92, 246, 0.1);
+    border: 1px solid var(--accent-primary, #8b5cf6);
+    border-radius: 4px;
+  }
+
+  .ai-label {
+    margin: 0 0 0.5rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--accent-primary, #8b5cf6);
+  }
+
+  .ai-text {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
   }
 
   .hex-table {

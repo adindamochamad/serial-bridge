@@ -13,6 +13,8 @@ import {
   META_MODEL_SPARK,
   MUSE_SPARK_PRICING_USD_PER_MTOK,
   metaMessagesCreate,
+  metaValidateParserJson,
+  metaExplainBlock,
 } from './meta-api.js';
 import { hasApiKey } from './settings.js';
 import type { DataLine, DiscoveredDevice } from './types.js';
@@ -840,4 +842,195 @@ Use your tools to investigate as needed. Begin investigation now.${
     total_api_calls: apiCalls,
     usage,
   };
+}
+
+/**
+ * Iterative parser refinement: Muse Spark proposes a parser, we validate it
+ * in Rust, test it against captured frames, and feed back failures so the
+ * model can refine. Shows iteration trace in AgentTracePanel.
+ */
+export interface RefinementResult {
+  analysis: ProtocolAnalysis | null;
+  trace: AgentStep[];
+  iterations: number;
+  stopped_at: 'success' | 'max_iterations' | 'error';
+  error?: string;
+  usage: UsageStats;
+  total_api_calls: number;
+}
+
+const MAX_REFINEMENT_ITERATIONS = 5;
+
+function makeStep(type: AgentStepType, partial: Partial<AgentStep>): AgentStep {
+  return {
+    id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    type,
+    timestamp: Date.now(),
+    ...partial,
+  };
+}
+
+export async function refineParserIteratively(
+  lines: DataLine[],
+  devices: DiscoveredDevice[],
+  emit: (step: AgentStep) => void
+): Promise<RefinementResult> {
+  await requireMetaHost();
+
+  const device = devices.length > 0 ? devices[0] : null;
+
+  const usage: UsageStats = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    estimated_cost_usd: 0,
+    cache_hit_ratio: 0,
+  };
+
+  const trace: AgentStep[] = [];
+  let apiCalls = 0;
+  let lastProposal: ProtocolAnalysis | null = null;
+  let feedbackMessages: string[] = [];
+
+  for (let iteration = 0; iteration < MAX_REFINEMENT_ITERATIONS; iteration++) {
+    emit(makeStep('thinking', { text: `Refinement iteration ${iteration + 1}/${MAX_REFINEMENT_ITERATIONS}` }));
+
+    // Build prompt with feedback from previous iteration
+    const userPrompt = iteration === 0
+      ? 'Analyze the serial data and generate a parser in strict JSON format.'
+      : `Previous parser attempt failed validation or testing. Feedback:\n${feedbackMessages.join('\n')}\n\nRefine the parser and try again.`;
+
+    const messages: Anthropic.Messages.MessageParam[] = [
+      { role: 'user', content: userPrompt }
+    ];
+
+    let response: Anthropic.Messages.Message;
+    try {
+      response = await metaMessagesCreate({
+        model: META_MODEL_SPARK,
+        max_tokens: 4096,
+        thinking: { type: 'adaptive' },
+        system: cachedSystemPrompt(SYSTEM_PROMPT),
+        messages,
+        tools: AGENT_TOOLS as unknown as Anthropic.Messages.Tool[],
+      });
+      apiCalls++;
+      addUsageFromResponse(usage, response.usage);
+    } catch (e) {
+      const msg = friendlyError(e);
+      emit(makeStep('error', { error: msg }));
+      return {
+        trace,
+        analysis: null,
+        iterations: iteration + 1,
+        stopped_at: 'error',
+        error: msg,
+        usage,
+        total_api_calls: apiCalls,
+      };
+    }
+
+    // Process response blocks
+    for (const block of response.content) {
+      if (block.type === 'thinking') {
+        emit(makeStep('thinking', { text: block.thinking }));
+      } else if (block.type === 'text') {
+        if (block.text.trim()) {
+          emit(makeStep('text', { text: block.text }));
+          // Try to extract JSON from text
+          const extracted = extractAnalysisFromText(block.text);
+          if (extracted) {
+            lastProposal = extracted;
+          }
+        }
+      }
+    }
+
+    if (!lastProposal) {
+      feedbackMessages = ['No valid JSON parser proposal found in response.'];
+      continue;
+    }
+
+    // Validate schema in Rust
+    try {
+      await metaValidateParserJson(lastProposal);
+      emit(makeStep('text', { text: '✓ Schema validation passed' }));
+    } catch (err) {
+      const errMsg = String(err);
+      feedbackMessages = [`Schema validation failed: ${errMsg}`];
+      emit(makeStep('text', { text: `✗ Schema validation failed: ${errMsg}` }));
+      lastProposal = null;
+      continue;
+    }
+
+    // Test parser against sample lines (take last 20)
+    const testLines = lines.slice(-20);
+    const testResults: string[] = [];
+    let successCount = 0;
+
+    for (const field of lastProposal.fields) {
+      if (!field.regex) continue;
+      
+      let matched = false;
+      for (const line of testLines) {
+        const testString = field.match_hex ? line.hex : line.ascii;
+        try {
+          const regex = new RegExp(field.regex);
+          if (regex.test(testString)) {
+            matched = true;
+            successCount++;
+            break;
+          }
+        } catch {
+          // Invalid regex
+        }
+      }
+
+      if (!matched) {
+        testResults.push(`Field '${field.name}' regex did not match any of the ${testLines.length} test lines.`);
+      }
+    }
+
+    if (successCount === 0 && lastProposal.fields.some(f => f.regex)) {
+      feedbackMessages = [`Parser testing failed:\n${testResults.join('\n')}`];
+      emit(makeStep('text', { text: `✗ Parser testing failed: No fields matched sample data` }));
+      lastProposal = null;
+      continue;
+    }
+
+    // Success! Parser is valid and at least one field matched
+    emit(makeStep('final', { text: `✓ Parser validated and tested successfully (${successCount} field matches)` }));
+    return {
+      analysis: lastProposal,
+      trace,
+      iterations: iteration + 1,
+      stopped_at: 'success',
+      usage,
+      total_api_calls: apiCalls,
+    };
+  }
+
+  // Max iterations reached
+  return {
+    trace,
+    analysis: lastProposal,
+    iterations: MAX_REFINEMENT_ITERATIONS,
+    stopped_at: 'max_iterations',
+    error: 'Maximum refinement iterations reached',
+    usage,
+    total_api_calls: apiCalls,
+  };
+}
+
+function extractAnalysisFromText(text: string): ProtocolAnalysis | null {
+  // Try to find JSON in the text, between ```json and ``` or just bare JSON
+  const jsonMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/) || text.match(/(\{[\s\S]*\})/);
+  if (!jsonMatch) return null;
+
+  try {
+    return JSON.parse(jsonMatch[1]) as ProtocolAnalysis;
+  } catch {
+    return null;
+  }
 }

@@ -302,6 +302,142 @@ pub async fn meta_list_models(
         .collect())
 }
 
+/// Generate a plain-language explanation of why Safe Mode blocked a command.
+/// This is explanation-only — cannot bypass the gate.
+#[tauri::command]
+pub async fn meta_explain_block(
+    state: State<'_, Mutex<MetaApiState>>,
+    blocked_hex: String,
+    block_reason: String,
+) -> Result<String, String> {
+    let (client, key) = {
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        let key = load_key_for_request(&guard)?;
+        (guard.client.clone(), key)
+    };
+
+    let prompt = format!(
+        "SerialBridge Safe Mode blocked this command:\nHex: {}\nReason: {}\n\nExplain in 2-3 sentences why this was blocked and what risk it posed. Be specific to the hex bytes shown.",
+        blocked_hex, block_reason
+    );
+
+    let payload = serde_json::json!({
+        "model": META_MODEL_SPARK,
+        "max_tokens": 200,
+        "messages": [{
+            "role": "user",
+            "content": prompt
+        }]
+    });
+
+    let response = client
+        .post(META_MESSAGES_URL)
+        .header("Authorization", format!("Bearer {}", key))
+        .header("Content-Type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| scrub_error_message(&e.to_string(), &key))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| scrub_error_message(&e.to_string(), &key))?;
+
+    if !status.is_success() {
+        return Err(scrub_error_message(
+            &format!(
+                "Meta Model API error ({}): {}",
+                status.as_u16(),
+                text.chars().take(200).collect::<String>()
+            ),
+            &key,
+        ));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("Invalid JSON from Meta Model API: {}", e))?;
+
+    // Extract text content from response
+    let content = parsed
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|block| block.get("text"))
+        .and_then(|t| t.as_str())
+        .ok_or("No text content in API response")?;
+
+    Ok(content.to_string())
+}
+
+/// Validate that a JSON value conforms to ProtocolAnalysis schema.
+/// Returns Ok(()) if valid, Err with description of what's missing/wrong.
+#[tauri::command]
+pub fn meta_validate_parser_json(body: serde_json::Value) -> Result<(), String> {
+    let obj = body.as_object().ok_or("Parser must be a JSON object")?;
+
+    // Required fields
+    obj.get("protocol")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing or invalid 'protocol' string")?;
+
+    let confidence = obj
+        .get("confidence")
+        .and_then(|v| v.as_u64())
+        .ok_or("Missing or invalid 'confidence' number")?;
+    if confidence > 100 {
+        return Err("'confidence' must be 0-100".into());
+    }
+
+    obj.get("device_hint")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing or invalid 'device_hint' string")?;
+
+    // Validate fields array
+    let fields = obj
+        .get("fields")
+        .and_then(|v| v.as_array())
+        .ok_or("Missing or invalid 'fields' array")?;
+
+    for (i, field) in fields.iter().enumerate() {
+        let f = field
+            .as_object()
+            .ok_or(format!("fields[{}] must be object", i))?;
+
+        f.get("name")
+            .and_then(|v| v.as_str())
+            .ok_or(format!("fields[{}].name missing or invalid", i))?;
+
+        f.get("description")
+            .and_then(|v| v.as_str())
+            .ok_or(format!("fields[{}].description missing or invalid", i))?;
+
+        // If regex present, it must be a string
+        if let Some(regex_val) = f.get("regex") {
+            regex_val
+                .as_str()
+                .ok_or(format!("fields[{}].regex must be string", i))?;
+        }
+
+        // If data_type present, validate it's one of the known types
+        if let Some(dt) = f.get("data_type").and_then(|v| v.as_str()) {
+            match dt {
+                "number" | "string" | "boolean" | "hex_u16_be" | "hex_u16_le" | "hex_s16_be"
+                | "hex_u8" => {}
+                _ => return Err(format!("fields[{}].data_type '{}' not recognized", i, dt)),
+            }
+        }
+    }
+
+    obj.get("notes")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing or invalid 'notes' string")?;
+
+    Ok(())
+}
+
 pub fn init_meta_api(app: &AppHandle) -> Result<(), String> {
     let key_path = app
         .path()
@@ -351,5 +487,86 @@ mod tests {
         let sys = map.get("system").unwrap().as_array().unwrap();
         assert!(sys[0].get("cache_control").is_none());
         assert_eq!(map.get("model").unwrap().as_str(), Some(META_MODEL_SPARK));
+    }
+
+    #[test]
+    fn validate_parser_accepts_valid_schema() {
+        let valid = serde_json::json!({
+            "protocol": "CAS Scale",
+            "confidence": 95,
+            "device_hint": "CAS SW-1 weighing scale",
+            "fields": [{
+                "name": "weight",
+                "value": "1.234",
+                "description": "Weight in kg",
+                "unit": "kg",
+                "regex": "GS,\\s*([\\d.]+)\\s*kg",
+                "data_type": "number"
+            }],
+            "notes": "Test notes"
+        });
+        assert!(super::meta_validate_parser_json(valid).is_ok());
+    }
+
+    #[test]
+    fn validate_parser_rejects_missing_protocol() {
+        let invalid = serde_json::json!({
+            "confidence": 90,
+            "device_hint": "Unknown",
+            "fields": [],
+            "notes": "Missing protocol"
+        });
+        let err = super::meta_validate_parser_json(invalid).unwrap_err();
+        assert!(err.contains("protocol"));
+    }
+
+    #[test]
+    fn validate_parser_rejects_invalid_confidence() {
+        let invalid = serde_json::json!({
+            "protocol": "Test",
+            "confidence": 150,
+            "device_hint": "Device",
+            "fields": [],
+            "notes": "Over 100"
+        });
+        let err = super::meta_validate_parser_json(invalid).unwrap_err();
+        assert!(err.contains("confidence"));
+    }
+
+    #[test]
+    fn validate_parser_rejects_invalid_data_type() {
+        let invalid = serde_json::json!({
+            "protocol": "Test",
+            "confidence": 90,
+            "device_hint": "Device",
+            "fields": [{
+                "name": "test",
+                "description": "Test field",
+                "data_type": "invalid_type"
+            }],
+            "notes": "Bad type"
+        });
+        let err = super::meta_validate_parser_json(invalid).unwrap_err();
+        assert!(err.contains("data_type"));
+        assert!(err.contains("not recognized"));
+    }
+
+    #[test]
+    fn validate_parser_accepts_hex_data_types() {
+        let valid = serde_json::json!({
+            "protocol": "Modbus RTU",
+            "confidence": 85,
+            "device_hint": "Temperature sensor",
+            "fields": [{
+                "name": "temp",
+                "description": "Temperature",
+                "regex": "^01 03 14 ([0-9A-F]{2} [0-9A-F]{2})",
+                "match_hex": true,
+                "data_type": "hex_u16_be",
+                "unit": "°C"
+            }],
+            "notes": "Modbus test"
+        });
+        assert!(super::meta_validate_parser_json(valid).is_ok());
     }
 }
