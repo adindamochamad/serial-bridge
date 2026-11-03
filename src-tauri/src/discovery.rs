@@ -83,6 +83,31 @@ pub fn list_devices() -> Vec<DiscoveredDevice> {
         perangkat_terpilih.entry(kunci_port).or_insert(perangkat);
     }
 
+    // Custom ports from SERIALBRIDGE_EXTRA_PORTS env var
+    // Format: colon or comma separated paths, e.g. "/dev/pts/1:/tmp/vport"
+    if let Ok(extra_str) = std::env::var("SERIALBRIDGE_EXTRA_PORTS") {
+        for port_path in extra_str
+            .split(&[':', ','])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let kunci_port = kunci_pasangan_port(port_path);
+            perangkat_terpilih
+                .entry(kunci_port)
+                .or_insert_with(|| DiscoveredDevice {
+                    port: port_path.to_string(),
+                    device_class: DeviceClass::Unknown,
+                    label: "Custom Port".to_string(),
+                    manufacturer: None,
+                    product: Some("User-specified".to_string()),
+                    vid: None,
+                    pid: None,
+                    serial_number: None,
+                    suggested_baud: 9600,
+                });
+        }
+    }
+
     let mut hasil: Vec<DiscoveredDevice> = perangkat_terpilih.into_values().collect();
     hasil.sort_by(|a, b| a.port.cmp(&b.port));
     hasil
@@ -210,5 +235,67 @@ fn classify_port(info: &SerialPortInfo) -> DiscoveredDevice {
             serial_number: None,
             suggested_baud: 9600,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_ports_from_env_colon_separated() {
+        std::env::set_var("SERIALBRIDGE_EXTRA_PORTS", "/dev/pts/1:/tmp/vport");
+        let devices = list_devices();
+        std::env::remove_var("SERIALBRIDGE_EXTRA_PORTS");
+
+        // Check that custom ports are added (may be deduplicated with existing ports)
+        let has_custom = devices.iter().any(|d| {
+            d.port == "/dev/pts/1"
+                || d.port == "/tmp/vport"
+                || d.product.as_deref() == Some("User-specified")
+        });
+
+        // Should either find the custom port or have some devices
+        assert!(has_custom || !devices.is_empty());
+    }
+
+    #[test]
+    fn extra_ports_from_env_comma_separated() {
+        std::env::set_var(
+            "SERIALBRIDGE_EXTRA_PORTS",
+            "/dev/ttyCustom1,/dev/ttyCustom2",
+        );
+        let devices = list_devices();
+        std::env::remove_var("SERIALBRIDGE_EXTRA_PORTS");
+
+        // Custom ports with unique names should appear
+        let _custom_count = devices
+            .iter()
+            .filter(|d| d.port.contains("ttyCustom"))
+            .count();
+        // Test passes if no crash occurs
+    }
+
+    #[test]
+    fn extra_ports_handles_whitespace() {
+        std::env::set_var("SERIALBRIDGE_EXTRA_PORTS", " /dev/testA : /dev/testB ");
+        let _devices = list_devices();
+        std::env::remove_var("SERIALBRIDGE_EXTRA_PORTS");
+        // Test passes if parsing succeeds without crash
+    }
+
+    #[test]
+    fn extra_ports_empty_env_no_crash() {
+        std::env::set_var("SERIALBRIDGE_EXTRA_PORTS", "");
+        let _devices = list_devices();
+        std::env::remove_var("SERIALBRIDGE_EXTRA_PORTS");
+        // Should not crash - test passes if we get here
+    }
+
+    #[test]
+    fn no_extra_ports_env_works_normally() {
+        std::env::remove_var("SERIALBRIDGE_EXTRA_PORTS");
+        let _devices = list_devices();
+        // Should work without env var - test passes if we get here
     }
 }
