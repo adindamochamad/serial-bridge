@@ -254,7 +254,7 @@ USER QUESTION: ${ctx.question}`;
   let response: Anthropic.Messages.Message;
   try {
     response = await metaMessagesCreate({
-      max_tokens: 2048,
+      max_tokens: 4096,
       thinking: { type: 'enabled', budget_tokens: 1024 },
       system: cachedSystemPrompt(SYSTEM_PROMPT_ASK),
       messages,
@@ -986,13 +986,25 @@ export async function refineParserIteratively(
         (b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use'
       );
       
-      // Execute tools but continue refinement loop
+      // Messages API requires tool_result blocks after tool_use
+      const toolResultContent: Anthropic.Messages.ToolResultBlockParam[] = [];
       for (const tu of toolUses) {
-        const output = 'Tool calls not yet supported in refinement loop';
+        const output = 'Tool calls not supported in refinement loop. Please provide the parser JSON directly in a text block.';
         emit(makeStep('tool_result', { tool_name: tu.name, tool_output: output }));
+        toolResultContent.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: output,
+        });
       }
       
-      feedbackMessages = ['Model attempted tool use - please provide JSON directly in text response.'];
+      // Add user message with tool results
+      messages.push({
+        role: 'user',
+        content: toolResultContent as unknown as Anthropic.Messages.ContentBlockParam[]
+      });
+      
+      feedbackMessages = ['Tool use is not supported - provide JSON parser directly in text.'];
       continue;
     }
 
