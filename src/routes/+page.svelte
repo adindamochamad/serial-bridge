@@ -243,6 +243,15 @@
       }
 
       const baud = baudRates[port] ?? 9600;
+
+      // Set up error listener BEFORE starting monitor so we catch immediate errors
+      const unError = await listen<{ port: string; error: string }>("port:error", (ev) => {
+        if (ev.payload.port === port) {
+          monitoring[port] = false;
+          toast('error', `${port.split('/').at(-1)}: ${ev.payload.error}`, 6000);
+        }
+      });
+
       await invoke("start_port_monitor", { port, baudRate: baud });
       monitoring[port] = true;
       buffers[port] = [];
@@ -271,13 +280,6 @@
           if (wasActive) {
             toast('warn', `${port.split('/').at(-1)} disconnected`);
           }
-        }
-      });
-
-      const unError = await listen<{ port: string; error: string }>("port:error", (ev) => {
-        if (ev.payload.port === port) {
-          monitoring[port] = false;
-          toast('error', `${port.split('/').at(-1)}: ${ev.payload.error}`, 6000);
         }
       });
 

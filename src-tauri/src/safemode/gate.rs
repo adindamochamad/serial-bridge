@@ -992,6 +992,7 @@ mod tests {
             crate::PortRegistration {
                 active: true,
                 write_tx,
+                generation: 0,
             },
         );
         let mut engine = engine_send_bytes_needs_approval();
@@ -1032,6 +1033,7 @@ mod tests {
             crate::PortRegistration {
                 active: true,
                 write_tx,
+                generation: 0,
             },
         );
         (registry, write_rx)

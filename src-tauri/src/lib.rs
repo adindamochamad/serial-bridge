@@ -35,7 +35,11 @@ const WRITE_QUEUE_CAPACITY: usize = 32;
 pub(crate) struct PortRegistration {
     active: bool,
     write_tx: SyncSender<Vec<u8>>,
+    /// Unique per start; a reader thread only honours/removes its own registration.
+    generation: u64,
 }
+
+static NEXT_MONITOR_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub(crate) type MonitorRegistry = Arc<Mutex<HashMap<String, PortRegistration>>>;
 
@@ -65,12 +69,28 @@ pub(crate) fn write_to_port(
     Ok(())
 }
 
-fn is_active(registry: &MonitorRegistry, port: &str) -> bool {
+fn is_active(registry: &MonitorRegistry, port: &str, generation: u64) -> bool {
     registry
         .lock()
         .ok()
-        .and_then(|map| map.get(port).map(|r| r.active))
+        .and_then(|map| {
+            map.get(port)
+                .map(|r| r.active && r.generation == generation)
+        })
         .unwrap_or(false)
+}
+
+/// Remove the registration only if it still belongs to this reader thread.
+fn remove_if_owned(registry: &MonitorRegistry, port: &str, generation: u64) {
+    if let Ok(mut map) = registry.lock() {
+        if map
+            .get(port)
+            .map(|r| r.generation == generation)
+            .unwrap_or(false)
+        {
+            map.remove(port);
+        }
+    }
 }
 
 fn kandidat_port_macos(nama_port: &str) -> Vec<String> {
@@ -90,19 +110,49 @@ fn kandidat_port_macos(nama_port: &str) -> Vec<String> {
     }
 }
 
+/// On Unix, serialport opens ttys with TIOCEXCL. The flag lives on the tty, not
+/// the fd, so if anything else keeps the tty open (a socat/virtual pty pair, a
+/// USB-serial driver that holds the line) the flag survives our close and every
+/// reopen fails with EBUSY — e.g. the CAS warmup 19200→9600 stop/start.
+/// This guard clears the flag just before our fd is closed.
+pub(crate) struct ExclusiveRelease(#[allow(dead_code)] Option<i32>);
+
+impl Drop for ExclusiveRelease {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(fd) = self.0 {
+            // SAFETY: fd is still owned by the serial port, which is dropped after this guard.
+            unsafe {
+                libc::ioctl(fd, libc::TIOCNXCL as _);
+            }
+        }
+    }
+}
+
+/// Returns the port plus a guard; bind the guard AFTER the port so it drops first.
 fn buka_port_dengan_konfigurasi(
     nama_port: &str,
     baud_rate: u32,
-) -> Result<Box<dyn SerialPort>, String> {
+) -> Result<(Box<dyn SerialPort>, ExclusiveRelease), String> {
     let mut daftar_error: Vec<String> = Vec::new();
     for kandidat_port in kandidat_port_macos(nama_port) {
-        let hasil_buka = serialport::new(&kandidat_port, baud_rate)
+        let builder = serialport::new(&kandidat_port, baud_rate)
             .data_bits(DataBits::Eight)
             .parity(Parity::None)
             .stop_bits(StopBits::One)
             .flow_control(FlowControl::None)
-            .timeout(std::time::Duration::from_millis(100))
-            .open();
+            .timeout(std::time::Duration::from_millis(100));
+        #[cfg(unix)]
+        let hasil_buka = serialport::TTYPort::open(&builder).map(|p| {
+            use std::os::unix::io::AsRawFd;
+            let fd = p.as_raw_fd();
+            (
+                Box::new(p) as Box<dyn SerialPort>,
+                ExclusiveRelease(Some(fd)),
+            )
+        });
+        #[cfg(not(unix))]
+        let hasil_buka = builder.open().map(|p| (p, ExclusiveRelease(None)));
         match hasil_buka {
             Ok(port_serial) => return Ok(port_serial),
             Err(error_buka) => {
@@ -129,6 +179,7 @@ async fn start_port_monitor(
 
     // Create write channel synchronously so send_bytes_to_port calls race-free
     let (write_tx, write_rx) = sync_channel::<Vec<u8>>(WRITE_QUEUE_CAPACITY);
+    let generation = NEXT_MONITOR_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     {
         let mut map = registry.lock().map_err(|e| e.to_string())?;
@@ -140,6 +191,7 @@ async fn start_port_monitor(
             PortRegistration {
                 active: true,
                 write_tx,
+                generation,
             },
         );
     }
@@ -148,16 +200,14 @@ async fn start_port_monitor(
     let reg = registry.clone();
 
     std::thread::spawn(move || {
-        let mut serial = match buka_port_dengan_konfigurasi(&port_name, baud_rate) {
+        let (mut serial, _excl_guard) = match buka_port_dengan_konfigurasi(&port_name, baud_rate) {
             Ok(p) => p,
             Err(e) => {
                 let _ = app.emit(
                     "port:error",
                     serde_json::json!({ "port": &port_name, "error": e.to_string() }),
                 );
-                if let Ok(mut map) = reg.lock() {
-                    map.remove(&port_name);
-                }
+                remove_if_owned(&reg, &port_name, generation);
                 return;
             }
         };
@@ -165,7 +215,7 @@ async fn start_port_monitor(
         let mut buf = vec![0u8; 512];
 
         loop {
-            if !is_active(&reg, &port_name) {
+            if !is_active(&reg, &port_name, generation) {
                 break;
             }
 
@@ -237,10 +287,20 @@ async fn start_port_monitor(
             }
         }
 
-        if let Ok(mut map) = reg.lock() {
-            map.remove(&port_name);
+        // A newer monitor may have replaced us (e.g. CAS warmup stop→start);
+        // don't tear down its registration or tell the UI the port closed.
+        let owned = reg
+            .lock()
+            .map(|m| {
+                m.get(&port_name)
+                    .map(|r| r.generation == generation)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        remove_if_owned(&reg, &port_name, generation);
+        if owned {
+            let _ = app.emit("port:closed", &port_name);
         }
-        let _ = app.emit("port:closed", &port_name);
     });
 
     Ok(())
@@ -284,6 +344,7 @@ mod tests {
             PortRegistration {
                 active: true,
                 write_tx,
+                generation: 0,
             },
         );
         write_to_port(&registry, "ttyTEST", vec![1, 2, 3]).unwrap();
@@ -307,6 +368,7 @@ mod tests {
             PortRegistration {
                 active: false,
                 write_tx,
+                generation: 0,
             },
         );
         assert_eq!(
@@ -317,7 +379,7 @@ mod tests {
 }
 
 fn probe_single_sync(port: &str, baud: u32) -> BaudProbeResult {
-    let mut serial = match buka_port_dengan_konfigurasi(port, baud) {
+    let (mut serial, _excl_guard) = match buka_port_dengan_konfigurasi(port, baud) {
         Ok(p) => p,
         Err(e) => {
             return BaudProbeResult {
